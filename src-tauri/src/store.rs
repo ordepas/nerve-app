@@ -54,7 +54,9 @@ impl Store {
         if p.exists() {
             self.read_json(&p)
         } else {
-            let cfg = AgentsConfig::default();
+            // "{}" activa el #[serde(default)] con la lista real de agentes;
+            // AgentsConfig::default() del derive produciría un Vec vacío.
+            let cfg: AgentsConfig = serde_json::from_str("{}").map_err(|e| e.to_string())?;
             self.write_json(&p, &cfg)?;
             Ok(cfg)
         }

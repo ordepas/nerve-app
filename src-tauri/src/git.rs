@@ -192,7 +192,10 @@ pub fn merge_worktree(cwd: &Path, id: &str) -> Result<(), String> {
     let branch = format!("nerve/{}", id);
     git(
         cwd,
-        &s(&["merge", "--no-ff", &branch, "-m", &format!("Nerve: merge {}", id)]),
+        &s(&[
+            "-c", "user.name=nerve", "-c", "user.email=nerve@local",
+            "merge", "--no-ff", &branch, "-m", &format!("Nerve: merge {}", id),
+        ]),
     )?;
     Ok(())
 }
