@@ -1,0 +1,483 @@
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+
+use crate::git;
+use crate::mock_agent;
+use crate::model::{AgentDef, Run, RunEvent, Task};
+use crate::store::{new_id, now_ms, Store};
+
+/// Mata el proceso hijo al soltarlo (cancelación o fin del run).
+pub struct KillChild(pub std::process::Child);
+
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct CancelState {
+    pub flag: Arc<AtomicBool>,
+    pub pid: Arc<Mutex<Option<u32>>>,
+}
+
+impl CancelState {
+    pub fn cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+}
+
+pub type RunRegistry = Mutex<std::collections::HashMap<String, CancelState>>;
+
+pub fn register_run(registry: &RunRegistry, run_id: &str) -> CancelState {
+    let st = CancelState::default();
+    registry
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string(), st.clone());
+    st
+}
+
+pub fn unregister_run(registry: &RunRegistry, run_id: &str) {
+    registry.lock().unwrap().remove(run_id);
+}
+
+pub fn plan_prompt(intent: &str) -> String {
+    format!(
+        "Eres el planificador de Nerve. A partir de la intención del usuario, inspecciona el repositorio (solo lectura) y produce:\n\n1) Una especificación en Markdown con: propósito, alcance, decisiones de diseño y criterios de aceptación globales.\n2) Una lista de tickets de implementación.\n\nTu respuesta final debe terminar EXACTAMENTE con este bloque JSON en una línea:\n```json\n{{\"tickets\":[{{\"id\":\"T1\",\"title\":\"...\",\"description\":\"...\",\"acceptance\":[\"...\"],\"verify_command\":\"comando opcional o null\",\"depends_on\":[]}}]}}\n```\n\nReglas: tickets pequeños y verificables; usa depends_on con ids si hay orden; no modifiques ningún archivo.\n\nIntención del usuario:\n{intent}"
+    )
+}
+
+pub type ExecTicket = (String, String, String, Vec<String>, Option<String>);
+
+pub fn exec_prompt(task_title: &str, tickets: &[ExecTicket]) -> String {
+    let mut list = String::new();
+    for (id, title, desc, acc, verify) in tickets {
+        list.push_str(&format!(
+            "- id: {}\n  título: {}\n  descripción: {}\n  criterios de aceptación: {}\n  verificación: {}\n",
+            id,
+            title,
+            desc,
+            if acc.is_empty() {
+                "-".to_string()
+            } else {
+                acc.join("; ")
+            },
+            verify.clone().unwrap_or_else(|| "-".to_string())
+        ));
+    }
+    format!(
+        "Eres un agente de ejecución de Nerve. Tarea: {task_title}\n\nImplementa los siguientes tickets, en orden de dependencias:\n{list}\n\nReglas:\n- Trabaja SOLO sobre el directorio actual (es un git worktree aislado).\n- No hagas commits ni nada relacionado con git.\n- Cuando termines cada ticket, imprime una línea exacta: TICKET_DONE: <id>\n- Cuando termines todos, imprime una línea exacta: NERVE_RUN_COMPLETE\n- No imprimas las líneas de control dentro de bloques de código."
+    )
+}
+
+pub fn extract_json_block(text: &str) -> Option<Value> {
+    let candidate = if let Some(start) = text.find("```json") {
+        let rest = &text[start + 7..];
+        let end = rest.find("```").unwrap_or(rest.len());
+        rest[..end].trim().to_string()
+    } else {
+        text.lines()
+            .rev()
+            .find(|l| l.trim_start().starts_with('{') && l.contains("\"tickets\""))
+            .map(|l| l.trim().to_string())?
+    };
+    serde_json::from_str(&candidate).ok()
+}
+
+pub fn emit(
+    app: &AppHandle,
+    store: &Store,
+    task_id: &str,
+    run_id: &str,
+    kind: &str,
+    text: Option<String>,
+    ticket_id: Option<String>,
+) {
+    let ev = RunEvent {
+        ts: now_ms(),
+        kind: kind.to_string(),
+        text,
+        ticket_id,
+    };
+    let _ = store.append_event(task_id, run_id, &ev);
+    let _ = app.emit(
+        "run-event",
+        json!({"taskId": task_id, "runId": run_id, "event": ev}),
+    );
+}
+
+pub fn resolve_agent<'a>(agents: &'a [AgentDef], id: &str) -> Result<AgentDef, String> {
+    let a = agents
+        .iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| format!("agente {} no encontrado", id))?;
+    if !a.enabled || a.kind == "disabled" {
+        return Err(format!("agente {} deshabilitado", id));
+    }
+    Ok(a.clone())
+}
+
+/// Escribe el prompt en un archivo temporal (lo pasamos por stdin para evitar
+/// problemas de quoting y saltos de línea en cmd.exe).
+fn write_prompt_file(prompt: &str) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir();
+    let p = dir.join(format!("nerve-prompt-{}-{}.txt", now_ms(), new_id("p")));
+    fs::write(&p, prompt).map_err(|e| format!("no se pudo escribir el prompt temporal: {}", e))?;
+    Ok(p)
+}
+
+/// Lanza el CLI del agente en modo headless con stream-json.
+#[cfg(windows)]
+fn spawn_agent(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>) -> Result<KillChild, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/c").arg(bin).args(args);
+    cmd.current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    match stdin_file {
+        Some(f) => {
+            let file = fs::File::open(f).map_err(|e| e.to_string())?;
+            cmd.stdin(Stdio::from(file));
+        }
+        None => {
+            cmd.stdin(Stdio::null());
+        }
+    }
+    cmd.spawn()
+        .map(KillChild)
+        .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))
+}
+
+#[cfg(not(windows))]
+fn spawn_agent(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>) -> Result<KillChild, String> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match stdin_file {
+        Some(f) => {
+            let file = fs::File::open(f).map_err(|e| e.to_string())?;
+            cmd.stdin(Stdio::from(file));
+        }
+        None => {
+            cmd.stdin(Stdio::null());
+        }
+    }
+    cmd.spawn()
+        .map(KillChild)
+        .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))
+}
+
+/// Lee stream-json del hijo hasta el evento result; devuelve (texto_final, session_id).
+fn read_stream(
+    child: &mut KillChild,
+    cancel: &CancelState,
+) -> Result<(String, Option<String>), String> {
+    let stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or("no se pudo leer stdout del agente")?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut final_text = String::new();
+    let mut session_id: Option<String> = None;
+    loop {
+        if cancel.cancelled() {
+            return Err("__cancelled__".into());
+        }
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("system") => {
+                if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
+                    session_id = Some(sid.to_string());
+                }
+            }
+            Some("assistant") => {
+                if let Some(content) = v.pointer("/message/content").and_then(Value::as_array) {
+                    for item in content {
+                        if item.get("type").and_then(Value::as_str) == Some("text") {
+                            if let Some(t) = item.get("text").and_then(Value::as_str) {
+                                final_text.push_str(t);
+                            }
+                        }
+                    }
+                }
+            }
+            Some("result") => {
+                if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
+                    session_id = Some(sid.to_string());
+                }
+                if let Some(r) = v.get("result").and_then(Value::as_str) {
+                    final_text = r.to_string();
+                }
+                let is_err = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                if is_err {
+                    return Err("el agente terminó con error".into());
+                }
+                return Ok((final_text, session_id));
+            }
+            _ => {}
+        }
+    }
+    Ok((final_text, session_id))
+}
+
+pub struct RunPaths {
+    pub base_sha: Option<String>,
+    pub worktree_path: Option<PathBuf>,
+    pub worktree_id: Option<String>,
+}
+
+pub fn prepare_paths(task: &Task, run_id: &str, ws: &Path) -> Result<RunPaths, String> {
+    let id = format!("{}-{}", task.id, &run_id[..12.min(run_id.len())]);
+    let dir = git::add_worktree(ws, &id)?;
+    Ok(RunPaths {
+        base_sha: Some(git::head_sha(ws)?),
+        worktree_path: Some(dir),
+        worktree_id: Some(id),
+    })
+}
+
+fn finish(app: &AppHandle, store: &Store, registry: &RunRegistry, run: &mut Run, err: Option<String>) {
+    match err {
+        None => run.status = "done".into(),
+        Some(e) => {
+            if e == "__cancelled__" {
+                run.status = "cancelled".into();
+            } else {
+                run.status = "failed".into();
+                run.summary = Some(e.clone());
+                emit(app, store, &run.task_id, &run.id, "error", Some(e), None);
+            }
+        }
+    }
+    run.finished_at = Some(now_ms());
+    let _ = store.save_run(run);
+    unregister_run(registry, &run.id);
+}
+
+/// Ejecución del PLAN: solo lectura, siempre sobre el workspace (sin worktree).
+pub fn run_plan(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    _mode: &str,
+    ws: &Path,
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: "plan".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        emit(&app, store, &task.id, run_id, "info", Some("Generando spec y plan…".into()), None);
+        let (spec, tickets_json) = if agent.kind == "mock" {
+            mock_agent::plan_output(&task.intent)
+        } else {
+            let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
+            let args: Vec<String> = agent.plan_args.clone();
+            let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                read_stream(&mut child, &cancel)
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let (text, sid) = res?;
+            run.session_id = sid;
+            let tickets = extract_json_block(&text)
+                .ok_or("el agente no devolvió el bloque JSON de tickets")?;
+            (text.clone(), tickets.to_string())
+        };
+
+        run.summary = Some(spec.lines().take(3).collect::<Vec<_>>().join(" "));
+        let _ = store.append_event(
+            &task.id,
+            run_id,
+            &RunEvent {
+                ts: now_ms(),
+                kind: "plan".into(),
+                text: Some(tickets_json.clone()),
+                ticket_id: None,
+            },
+        );
+        let _ = app.emit(
+            "run-plan",
+            json!({"taskId": task.id, "runId": run_id, "spec": spec, "tickets": tickets_json}),
+        );
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
+
+/// Ejecución de tickets aprobados: cada ticket corre aislado y termina en checkpoint.
+pub fn run_exec(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    mode: &str,
+    ws: &Path,
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: mode.to_string(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        emit(&app, store, &task.id, run_id, "info", Some("Preparando entorno…".into()), None);
+        let paths = if mode == "workspace" {
+            if !git::is_repo(ws) {
+                return Err("el workspace no es un repositorio git; usa modo worktree".into());
+            }
+            if git::is_dirty(ws) {
+                return Err("el workspace tiene cambios sin confirmar; confírmalos o usa un worktree".into());
+            }
+            RunPaths {
+                base_sha: Some(git::head_sha(ws)?),
+                worktree_path: None,
+                worktree_id: None,
+            }
+        } else {
+            prepare_paths(task, run_id, ws)?
+        };
+        run.base_sha = paths.base_sha.clone();
+        run.worktree_path = paths
+            .worktree_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let cwd: PathBuf = paths
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| ws.to_path_buf());
+
+        let approved: Vec<_> = task
+            .tickets
+            .iter()
+            .filter(|t| t.approved && t.status != "done")
+            .collect();
+        if approved.is_empty() {
+            return Err("no hay tickets aprobados pendientes".into());
+        }
+
+        for t in &approved {
+            if cancel.cancelled() {
+                return Err("__cancelled__".into());
+            }
+            emit(&app, store, &task.id, run_id, "ticket-start", Some(t.title.clone()), Some(t.id.clone()));
+            let out = if agent.kind == "mock" {
+                let dir = cwd.join("nerve-run");
+                fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                mock_agent::exec_apply(&dir, &t.title)?
+            } else {
+                let prompt_file = write_prompt_file(&exec_prompt(
+                    &task.title,
+                    &[(
+                        t.id.clone(),
+                        t.title.clone(),
+                        t.description.clone(),
+                        t.acceptance.clone(),
+                        t.verify_command.clone(),
+                    )],
+                ))?;
+                let args: Vec<String> = agent.exec_args.clone();
+                let res = spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
+                    let pid = child.0.id();
+                    *cancel.pid.lock().unwrap() = Some(pid);
+                    read_stream(&mut child, &cancel)
+                });
+                let _ = fs::remove_file(&prompt_file);
+                let (text, sid) = res?;
+                if sid.is_some() {
+                    run.session_id = sid;
+                }
+                text
+            };
+            emit(&app, store, &task.id, run_id, "chunk", Some(out), Some(t.id.clone()));
+            let sha = git::commit_all(&cwd, &format!("nerve({}): {}", t.id, t.title))?;
+            run.checkpoint_sha = Some(sha.clone());
+            emit(&app, store, &task.id, run_id, "checkpoint", Some(sha), Some(t.id.clone()));
+        }
+
+        run.summary = Some(format!("{} ticket(s) ejecutados", approved.len()));
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
+
+// new_id se usa en write_prompt_file; mantener el import vivo.
+#[allow(dead_code)]
+fn _uses_new_id() -> String {
+    new_id("x")
+}
