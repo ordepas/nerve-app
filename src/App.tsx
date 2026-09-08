@@ -80,6 +80,13 @@ interface AgentsConfig {
   agents: AgentDef[];
 }
 
+type ModalSpec = {
+  title: string;
+  fields: FieldDef[];
+  submitLabel?: string;
+  onSubmit: (values: Record<string, string>) => void;
+};
+
 // ---------- helpers ----------
 
 const fmtTime = (ms: number) =>
@@ -92,6 +99,73 @@ const fmtTime = (ms: number) =>
 
 function statusChip(s: string) {
   return <span className={`chip chip-${s}`}>{s}</span>;
+}
+
+// ---------- modal ----------
+
+interface FieldDef {
+  key: string;
+  label: string;
+  multiline?: boolean;
+  initial?: string;
+  required?: boolean;
+}
+
+function FormModal(props: {
+  title: string;
+  fields: FieldDef[];
+  submitLabel?: string;
+  onSubmit: (values: Record<string, string>) => void;
+  onClose: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(props.fields.map((f) => [f.key, f.initial ?? ""])),
+  );
+
+  const submit = () => {
+    const missing = props.fields.find((f) => f.required && !values[f.key]?.trim());
+    if (missing) return;
+    props.onSubmit(values);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>{props.title}</h3>
+        {props.fields.map((f) => (
+          <label key={f.key}>
+            <span>{f.label}{f.required && " *"}</span>
+            {f.multiline ? (
+              <textarea
+                autoFocus={props.fields[0]?.key === f.key}
+                value={values[f.key] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+                }}
+              />
+            ) : (
+              <input
+                autoFocus={props.fields[0]?.key === f.key}
+                value={values[f.key] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                  if (e.key === "Escape") props.onClose();
+                }}
+              />
+            )}
+          </label>
+        ))}
+        <div className="modal-actions">
+          <button onClick={props.onClose}>Cancelar</button>
+          <button className="primary" onClick={submit}>
+            {props.submitLabel ?? "Guardar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ---------- app ----------
@@ -108,6 +182,9 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState("mock");
   const [runMode, setRunMode] = useState("worktree");
   const [error, setError] = useState<string | null>(null);
+  const [modal, setModal] = useState<ModalSpec | null>(null);
+
+  const openModal = useCallback((spec: ModalSpec) => setModal(spec), []);
 
   const refreshWorkspace = useCallback(async () => {
     try {
@@ -222,17 +299,26 @@ export default function App() {
         tasks={tasks}
         onOpenTask={openTask}
         onNewTask={async () => {
-          const title = window.prompt("Título de la tarea:");
-          if (!title) return;
-          const intent = window.prompt("Intención (¿qué quieres lograr?):");
-          if (!intent) return;
-          try {
-            const t = await invoke<Task>("create_task", { title, intent });
-            await refreshTasks();
-            void openTask(t.id);
-          } catch (e) {
-            setError(String(e));
-          }
+          openModal({
+            title: "Nueva task",
+            fields: [
+              { key: "title", label: "Título de la tarea", required: true },
+              { key: "intent", label: "Intención (¿qué quieres lograr?)", multiline: true, required: true },
+            ],
+            onSubmit: async (values) => {
+              setModal(null);
+              try {
+                const t = await invoke<Task>("create_task", {
+                  title: values.title.trim(),
+                  intent: values.intent.trim(),
+                });
+                await refreshTasks();
+                void openTask(t.id);
+              } catch (e) {
+                setError(String(e));
+              }
+            },
+          });
         }}
         onOpenSettings={() => setView("settings")}
       />
@@ -258,6 +344,7 @@ export default function App() {
             setRunMode={setRunMode}
             updateCurrent={updateCurrent}
             setError={setError}
+            openModal={openModal}
             refreshRuns={async () => {
               setRuns(await invoke<Run[]>("list_runs", { taskId: current.id }));
             }}
@@ -271,6 +358,18 @@ export default function App() {
           />
         )}
       </main>
+      {modal && (
+        <FormModal
+          title={modal.title}
+          fields={modal.fields}
+          submitLabel={modal.submitLabel}
+          onSubmit={(values) => {
+            setModal(null);
+            void modal.onSubmit(values);
+          }}
+          onClose={() => setModal(null)}
+        />
+      )}
     </div>
   );
 }
@@ -406,6 +505,7 @@ function TaskView(props: {
   setRunMode: (m: string) => void;
   updateCurrent: (t: Task) => void;
   setError: (e: string) => void;
+  openModal: (spec: ModalSpec) => void;
   refreshRuns: () => Promise<void>;
 }) {
   const { task } = props;
@@ -440,11 +540,31 @@ function TaskView(props: {
   };
 
   const addTicket = async () => {
-    const id = window.prompt("Id del ticket (ej. T3):");
-    if (!id) return;
-    const title = window.prompt("Título:") ?? "";
-    if (!title) return;
-    await saveTicket({ id, title, description: "", acceptance: [], verifyCommand: null, dependsOn: [], status: "todo", approved: false });
+    props.openModal({
+      title: "Nuevo ticket",
+      fields: [
+        { key: "id", label: "Id del ticket (ej. T3)", required: true },
+        { key: "title", label: "Título", required: true },
+        { key: "description", label: "Descripción", multiline: true },
+      ],
+      submitLabel: "Añadir",
+      onSubmit: async (values) => {
+        try {
+          await saveTicket({
+            id: values.id.trim(),
+            title: values.title.trim(),
+            description: values.description ?? "",
+            acceptance: [],
+            verifyCommand: null,
+            dependsOn: [],
+            status: "todo",
+            approved: false,
+          });
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
   };
 
   return (
@@ -452,12 +572,24 @@ function TaskView(props: {
       <div className="taskhead">
         <h1>{task.title}</h1>
         {statusChip(task.status)}
-        <button className="ghost" onClick={async () => {
-          const title = window.prompt("Nuevo título:", task.title);
-          if (!title) return;
-          const intent = window.prompt("Intención:", task.intent) ?? task.intent;
-          const t = await invoke<Task>("update_task", { task: { ...task, title, intent } });
-          props.updateCurrent(t);
+        <button className="ghost" onClick={() => {
+          props.openModal({
+            title: "Editar task",
+            fields: [
+              { key: "title", label: "Título", required: true, initial: task.title },
+              { key: "intent", label: "Intención", multiline: true, initial: task.intent },
+            ],
+            onSubmit: async (values) => {
+              try {
+                const t = await invoke<Task>("update_task", {
+                  task: { ...task, title: values.title.trim(), intent: values.intent },
+                });
+                props.updateCurrent(t);
+              } catch (e) {
+                props.setError(String(e));
+              }
+            },
+          });
         }}>✎</button>
       </div>
       <p className="hint mono">{task.intent}</p>

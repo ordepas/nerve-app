@@ -90,18 +90,42 @@ pub fn add_worktree(cwd: &Path, id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub fn remove_worktree(cwd: &Path, id: &str, force: bool) -> Result<(), String> {
+pub fn remove_worktree(cwd: &Path, id: &str, _force: bool) -> Result<(), String> {
     let dir = worktree_base(cwd).join(id);
-    let dir_str = dir.to_string_lossy().to_string();
-    let mut args = vec!["worktree".to_string(), "remove".to_string()];
-    if force {
-        args.push("--force".to_string());
-    }
-    args.push(dir_str);
-    git(cwd, &args)?;
     let branch = format!("nerve/{}", id);
+
+    // `git worktree remove` puede quedarse esperando confirmación interactiva
+    // cuando OneDrive bloquea archivos; se borra el directorio directamente y
+    // se hace prune del registro.
+    if dir.exists() {
+        remove_dir_retry(&dir, 3)?;
+    }
+    let _ = git(cwd, &s(&["worktree", "prune", "--verbose"]));
     let _ = git(cwd, &s(&["branch", "-D", &branch]));
+
+    if dir.exists() {
+        return Err(format!(
+            "no se pudo borrar el worktree {} (archivos bloqueados, p. ej. por OneDrive); reintenta en unos segundos",
+            id
+        ));
+    }
     Ok(())
+}
+
+fn remove_dir_retry(dir: &Path, attempts: u32) -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..attempts {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = e.to_string();
+                if i + 1 < attempts {
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+            }
+        }
+    }
+    Err(format!("no se pudo borrar {}: {}", dir.display(), last))
 }
 
 /// Lista los worktrees creados por Nerve: (id, ruta).

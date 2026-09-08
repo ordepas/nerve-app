@@ -132,3 +132,23 @@ pre.spec { max-height: 320px; color: var(--text); }
 .onboard { max-width: 520px; margin: 12vh auto; padding: 24px; }
 .onboard h1 { font-size: 28px; }
 details { margin-top: 6px; color: var(--muted); font-size: 12px; }
+
+/* ---------- modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 18px 20px; width: 460px; max-width: calc(100vw - 48px);
+  display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.modal h3 { margin: 0; font-size: 15px; }
+.modal label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.modal textarea {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 7px 10px; font-size: 13px;
+  font-family: inherit; resize: vertical; min-height: 74px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
