@@ -238,6 +238,157 @@ function StatusDot({ status, map }: { status: string; map: Record<string, string
   );
 }
 
+// ---------- artefactos (specs como documentos) ----------
+
+// renderer de markdown mínimo (títulos, listas, código, citas, énfasis) — sin dependencias
+function renderMarkdown(src: string): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = (s: string) =>
+    esc(s)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  const lines = src.split("\n");
+  const out: string[] = [];
+  let inCode = false;
+  let codeBuf: string[] = [];
+  let listOpen: "ul" | "ol" | null = null;
+  const closeList = () => {
+    if (listOpen) {
+      out.push(`</${listOpen}>`);
+      listOpen = null;
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const fence = line.match(/^```(\w*)/);
+    if (fence) {
+      if (inCode) {
+        out.push(`<pre class="md-code"><code>${esc(codeBuf.join("\n"))}</code></pre>`);
+        codeBuf = [];
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeBuf.push(raw);
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      closeList();
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`);
+      continue;
+    }
+    const ul = line.match(/^[-*]\s+(.*)$/);
+    const ol = line.match(/^\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      const want: "ul" | "ol" = ul ? "ul" : "ol";
+      if (listOpen !== want) {
+        closeList();
+        out.push(`<${want}>`);
+        listOpen = want;
+      }
+      out.push(`<li>${inline((ul ?? ol)![1])}</li>`);
+      continue;
+    }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      closeList();
+      out.push(`<blockquote>${inline(quote[1])}</blockquote>`);
+      continue;
+    }
+    if (/^(---|\*\*\*|___)\s*$/.test(line)) {
+      closeList();
+      out.push("<hr />");
+      continue;
+    }
+    if (line.trim() === "") {
+      closeList();
+      continue;
+    }
+    closeList();
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  if (inCode && codeBuf.length > 0) {
+    out.push(`<pre class="md-code"><code>${esc(codeBuf.join("\n"))}</code></pre>`);
+  }
+  closeList();
+  return out.join("\n");
+}
+
+function SpecArtifact(props: { task: Task }) {
+  const { task } = props;
+  const [copied, setCopied] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  if (!task.specCurrent) {
+    return <div className="empty-card">Aún no hay spec. Usa “Generar spec y plan”.</div>;
+  }
+  const versions = task.specVersions;
+  const download = () => {
+    const blob = new Blob([task.specCurrent!], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "spec.md";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(task.specCurrent!);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* noop */
+    }
+  };
+  return (
+    <div className="artifact">
+      <div className="artifact-head">
+        <span className="artifact-icon" aria-hidden="true">📄</span>
+        <div className="artifact-title">
+          <strong>spec.md</strong>
+          <span className="artifact-sub">
+            {versions.length > 0 ? `v${versions[versions.length - 1].version}` : "v1"} ·{" "}
+            {task.specCurrent!.split("\n").length} líneas · {fmtTime(task.updatedAt)}
+          </span>
+        </div>
+        <div className="artifact-actions">
+          {versions.length > 1 && (
+            <button className="ghost" onClick={() => setShowHistory(!showHistory)}>
+              {showHistory ? "Ocultar historial" : `Historial (${versions.length})`}
+            </button>
+          )}
+          <button className="ghost" onClick={copy}>{copied ? "✓ Copiado" : "Copiar"}</button>
+          <button className="ghost" onClick={download}>Descargar</button>
+        </div>
+      </div>
+      {showHistory && versions.length > 1 && (
+        <ul className="artifact-history">
+          {versions.map((v) => (
+            <li key={v.version}>
+              <span className="mono">v{v.version}</span> — {fmtTime(v.createdAt)}
+              {v.version === versions[versions.length - 1].version && (
+                <span className="chip chip-approved">actual</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div
+        className="artifact-body md"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(task.specCurrent!) }}
+      />
+    </div>
+  );
+}
+
 // ---------- modal ----------
 
 interface FieldDef {
@@ -1277,21 +1428,7 @@ function TaskView(props: {
       <div className="cols">
         <section className="col">
           <h2 className="spec-anchor">Spec</h2>
-          {task.specCurrent ? (
-            <>
-              <pre className="spec">{task.specCurrent}</pre>
-              <details>
-                <summary>Historial ({task.specVersions.length} versiones)</summary>
-                <ul>
-                  {task.specVersions.map((v) => (
-                    <li key={v.version}>v{v.version} — {fmtTime(v.createdAt)}</li>
-                  ))}
-                </ul>
-              </details>
-            </>
-          ) : (
-            <div className="empty-card">Aún no hay spec. Usa “Generar spec y plan”.</div>
-          )}
+          <SpecArtifact task={task} />
 
           <h2>Tickets ({task.tickets.length})</h2>
           <div className="tickets">
