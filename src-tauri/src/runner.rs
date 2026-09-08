@@ -57,6 +57,22 @@ pub fn plan_prompt(intent: &str) -> String {
     )
 }
 
+/// Prompt del planificador: plantilla de la skill (si trae) con la intención
+/// incrustada; si la plantilla no tiene {intent}, se añade al final.
+pub fn plan_prompt_for_skill(intent: &str, template: Option<String>) -> String {
+    match template {
+        None => plan_prompt(intent),
+        Some(t) if t.trim().is_empty() => plan_prompt(intent),
+        Some(t) => {
+            if t.contains("{intent}") {
+                t.replace("{intent}", intent)
+            } else {
+                format!("{}\n\nIntención del usuario:\n{}", t, intent)
+            }
+        }
+    }
+}
+
 pub type ExecTicket = (String, String, String, Vec<String>, Option<String>);
 
 pub fn exec_prompt(task_title: &str, tickets: &[ExecTicket]) -> String {
@@ -619,8 +635,38 @@ pub fn run_plan(
     _mode: &str,
     ws: &Path,
     resume_session: bool,
+    skill_id: &str,
 ) -> Run {
     let cancel = register_run(registry, run_id);
+    // plantilla de la skill elegida (None = plan estándar)
+    let skill_template = if agent.kind == "mock" || agent.kind == "ollama" {
+        None
+    } else {
+        match crate::skills::resolve_template(store, skill_id) {
+            Ok(t) => t,
+            Err(e) => {
+                let mut run = Run {
+                    id: run_id.to_string(),
+                    task_id: task.id.clone(),
+                    agent: agent.id.clone(),
+                    mode: "plan".into(),
+                    worktree: None,
+                    worktree_path: None,
+                    base_sha: None,
+                    checkpoint_sha: None,
+                    started_at: now_ms(),
+                    finished_at: None,
+                    status: "running".into(),
+                    session_id: None,
+                    summary: None,
+                    events: Vec::new(),
+                };
+                let _ = store.save_run(&run);
+                finish(&app, store, registry, &mut run, Some(e));
+                return run;
+            }
+        }
+    };
     // --resume: continúa la sesión previa del mismo agente en esta task
     // (solo qwen -r / claude --resume; mock/ollama no tienen sesiones)
     let resume_id: Option<String> = if resume_session
@@ -679,7 +725,7 @@ pub fn run_plan(
                 extract_json_block(&text).ok_or("el agente no devolvió el bloque JSON de tickets")?;
             (text.clone(), tickets.to_string())
         } else if agent.kind == "codex" {
-            let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
+            let prompt_file = write_prompt_file(&plan_prompt_for_skill(&task.intent, skill_template.clone()))?;
             let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
             let mut args: Vec<String> = agent.plan_args.clone();
             args.push("--output-last-message".into());
@@ -697,7 +743,7 @@ pub fn run_plan(
                 extract_json_block(&text).ok_or("el agente no devolvió el bloque JSON de tickets")?;
             (text.clone(), tickets.to_string())
         } else {
-            let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
+            let prompt_file = write_prompt_file(&plan_prompt_for_skill(&task.intent, skill_template.clone()))?;
             let mut args: Vec<String> = agent.plan_args.clone();
             // qwen: -r <id> · claude: --resume <id> (flag con valor separado)
             if let Some(sid) = &resume_id {

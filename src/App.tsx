@@ -94,6 +94,13 @@ interface WorkspaceCfg {
   commandAllowlist: string[];
 }
 
+interface SkillDef {
+  id: string;
+  label: string;
+  description: string;
+  template: string;
+}
+
 type ModalSpec = {
   title: string;
   fields: FieldDef[];
@@ -708,7 +715,18 @@ function TaskView(props: {
 }) {
   const { task } = props;
   const [resumeSession, setResumeSession] = useState(false);
+  const [skills, setSkills] = useState<SkillDef[]>([]);
+  const [selectedSkill, setSelectedSkill] = useState("plan");
   const [detail, setDetail] = useState<{ type: "ticket" | "run"; id: string } | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        setSkills(await invoke<SkillDef[]>("list_skills"));
+      } catch {
+        /* noop */
+      }
+    })();
+  }, []);
   const approvedPending = task.tickets.filter((t) => t.approved && t.status !== "done");
   const doneTickets = task.tickets.filter((t) => t.status === "done");
   const planned = task.tickets.length > 0 && !!task.specCurrent;
@@ -721,7 +739,7 @@ function TaskView(props: {
 
   const runPlan = async () => {
     try {
-      await invoke("start_plan_run", { taskId: task.id, agentId: props.selectedAgent, mode: "workspace", resumeSession: wantResume });
+      await invoke("start_plan_run", { taskId: task.id, agentId: props.selectedAgent, mode: "workspace", resumeSession: wantResume, skillId: selectedSkill });
       props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
@@ -847,6 +865,17 @@ function TaskView(props: {
             <option value="worktree">Ejecutar en worktree nuevo (aislado)</option>
             <option value="workspace">Ejecutar en workspace (directo)</option>
           </select>
+          {skills.length > 0 && (
+            <select
+              value={selectedSkill}
+              onChange={(e) => setSelectedSkill(e.target.value)}
+              title="Skill para el planificador"
+            >
+              {skills.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          )}
           <button className="primary" onClick={runPlan}>🧠 Generar spec y plan</button>
           {canResume && (
             <label className="mono small" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -1374,6 +1403,91 @@ function SecuritySection() {
   );
 }
 
+// ---------- skills ----------
+
+function SkillsSection() {
+  const [skills, setSkills] = useState<SkillDef[]>([]);
+  const [importPath, setImportPath] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const reload = async () => {
+    try {
+      setSkills(await invoke<SkillDef[]>("list_skills"));
+    } catch {
+      /* noop */
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div>
+      <table className="files">
+        <thead>
+          <tr><th>Skill</th><th>Descripción</th><th></th></tr>
+        </thead>
+        <tbody>
+          {skills.map((s) => (
+            <tr key={s.id}>
+              <td>{s.label}</td>
+              <td className="small dim">{s.description || "—"}</td>
+              <td>
+                {s.id.startsWith("user:") && (
+                  <button
+                    className="danger"
+                    onClick={async () => {
+                      try {
+                        await invoke("delete_skill", { id: s.id });
+                        await reload();
+                      } catch (e) {
+                        setMsg(String(e));
+                      }
+                    }}
+                  >
+                    Eliminar
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="row" style={{ marginTop: 8 }}>
+        <input
+          value={importPath}
+          onChange={(e) => setImportPath(e.target.value)}
+          placeholder="Ruta de un SKILL.md para importar (C:\\ruta\skill.md)"
+          style={{ flex: 1 }}
+        />
+        <button
+          className="primary"
+          onClick={async () => {
+            try {
+              const id = await invoke<string>("import_skill", { path: importPath.trim() });
+              setMsg(`Importada: ${id}`);
+              setImportPath("");
+              await reload();
+            } catch (e) {
+              setMsg(String(e));
+            }
+          }}
+        >
+          Importar SKILL.md
+        </button>
+      </div>
+      <p className="hint">
+        Las skills definen cómo el planificador interpreta tu intención. Elige una en la
+        toolbar (modo técnico) al generar el plan. Importa SKILL.md de Claude/Cursor con su
+        frontmatter (name, description) — el cuerpo se usa como plantilla del prompt.
+      </p>
+      {msg && <div className="hint">{msg}</div>}
+    </div>
+  );
+}
+
 function Settings(props: {
   projectPath: string | null;
   setProjectPath: (p: string | null) => void;
@@ -1425,6 +1539,9 @@ function Settings(props: {
 
       <h2>Seguridad</h2>
       <SecuritySection />
+
+      <h2>Skills</h2>
+      <SkillsSection />
 
       <h2>Agentes</h2>
       <p className="hint">

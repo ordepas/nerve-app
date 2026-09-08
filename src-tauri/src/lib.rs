@@ -8,6 +8,7 @@ mod mock_agent;
 mod model;
 mod ollama;
 mod runner;
+mod skills;
 mod store;
 
 use model::{
@@ -97,6 +98,42 @@ fn set_security(
         .collect();
     state.store.save_workspace(&cfg)?;
     Ok(cfg)
+}
+
+// ---------- skills ----------
+
+#[tauri::command]
+fn list_skills(state: State<AppState>) -> Result<Vec<skills::SkillDef>, String> {
+    skills::list_skills(&state.store)
+}
+
+#[tauri::command]
+fn save_skill(
+    id: String,
+    label: String,
+    description: String,
+    template: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    skills::save_skill(
+        &state.store,
+        skills::SkillDef {
+            id,
+            label,
+            description,
+            template,
+        },
+    )
+}
+
+#[tauri::command]
+fn delete_skill(id: String, state: State<AppState>) -> Result<(), String> {
+    skills::delete_skill(&state.store, &id)
+}
+
+#[tauri::command]
+fn import_skill(path: String, state: State<AppState>) -> Result<String, String> {
+    skills::import_skill(&state.store, &path)
 }
 
 // ---------- tasks ----------
@@ -226,6 +263,7 @@ fn spawn_run(
     mode: String,
     kind: &str,
     resume_session: bool,
+    skill_id: String,
 ) -> Result<Run, String> {
     let task = state.store.load_task(&task_id)?;
     if matches!(kind, "exec") {
@@ -248,11 +286,12 @@ fn spawn_run(
     let run_id_c = run_id.clone();
     let mode_c = mode.clone();
     let agent_id_c = agent.id.clone();
+    let skill_c = skill_id.clone();
 
     let app2 = app.clone();
     std::thread::spawn(move || {
         let run = if kind == "plan" {
-            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session)
+            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session, &skill_c)
         } else {
             runner::run_exec(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session)
         };
@@ -284,9 +323,19 @@ fn start_plan_run(
     agent_id: String,
     mode: String,
     resume_session: Option<bool>,
+    skill_id: Option<String>,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    spawn_run(app, &state, task_id, agent_id, mode, "plan", resume_session.unwrap_or(false))
+    spawn_run(
+        app,
+        &state,
+        task_id,
+        agent_id,
+        mode,
+        "plan",
+        resume_session.unwrap_or(false),
+        skill_id.unwrap_or_default(),
+    )
 }
 
 #[tauri::command]
@@ -298,7 +347,7 @@ fn start_exec_run(
     resume_session: Option<bool>,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    spawn_run(app, &state, task_id, agent_id, mode, "exec", resume_session.unwrap_or(false))
+    spawn_run(app, &state, task_id, agent_id, mode, "exec", resume_session.unwrap_or(false), String::new())
 }
 
 // ---------- diff / git ----------
@@ -414,6 +463,10 @@ pub fn run() {
             revert_run,
             list_agents,
             save_agents,
+            list_skills,
+            save_skill,
+            delete_skill,
+            import_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
