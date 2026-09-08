@@ -1315,6 +1315,7 @@ pub fn run_fix_run(
     mode: &str,
     ws: &Path,
     fix_prompt: &str,
+    target_run: Option<&Run>,
     agents_md: Option<&crate::agents_md::AgentsMd>,
 ) -> Run {
     let cancel = register_run(registry, run_id);
@@ -1338,7 +1339,19 @@ pub fn run_fix_run(
 
     let result: Result<(), String> = (|| {
         emit(&app, store, &task.id, run_id, "info", Some("Corrigiendo problemas de la verificación…".into()), None);
-        let paths = if mode == "workspace" {
+        // si hay run objetivo con worktree, la corrección trabaja ahí: los
+        // cambios de la ejecución aún no fusionados viven en ese directorio
+        let target_dir: Option<PathBuf> = target_run
+            .and_then(|t| t.worktree_path.as_ref())
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
+        let paths = if let Some(dir) = target_dir {
+            RunPaths {
+                base_sha: target_run.and_then(|t| t.base_sha.clone()),
+                worktree_path: Some(dir),
+                worktree_id: None,
+            }
+        } else if mode == "workspace" {
             if !git::is_repo(ws) {
                 return Err("el workspace no es un repositorio git; usa modo worktree".into());
             }

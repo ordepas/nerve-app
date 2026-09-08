@@ -424,7 +424,10 @@ export default function App() {
   const refreshAgents = useCallback(async () => {
     try {
       const cfg = await invoke<AgentsConfig>("list_agents");
-      setAgents(cfg.agents.filter((a) => a.enabled && a.kind !== "disabled"));
+      const enabled = cfg.agents.filter((a) => a.enabled && a.kind !== "disabled");
+      setAgents(enabled);
+      // con cada recarga, si el agente actual dejó de existir, elegir el primero real
+      setSelectedAgent((cur) => (enabled.some((a) => a.id === cur) ? cur : enabled[0]?.id ?? "mock"));
     } catch {
       setAgents([]);
     }
@@ -1136,8 +1139,9 @@ function TaskView(props: {
   };
 
   const fixAll = async () => {
+    if (!lastExecDone) return;
     try {
-      await invoke("fix_comments", { taskId: task.id, mode: props.runMode, agentId: props.selectedAgent });
+      await invoke("fix_comments", { taskId: task.id, mode: props.runMode, agentId: props.selectedAgent, targetRunId: lastExecDone.id });
       props.refreshRuns();
     } catch (e) {
       props.setError(String(e));

@@ -521,9 +521,17 @@ fn fix_comments(
     task_id: String,
     mode: String,
     agent_id: String,
+    target_run_id: String,
     state: State<AppState>,
 ) -> Result<Run, String> {
     let task = state.store.load_task(&task_id)?;
+    let target = state.store.load_run(&task_id, &target_run_id)?;
+    if target.mode == "plan" {
+        return Err("solo se corrigen runs de ejecución".into());
+    }
+    if target.status != "done" {
+        return Err("solo se corrigen runs terminados".into());
+    }
     let open: Vec<crate::model::ReviewComment> = task
         .review_comments
         .iter()
@@ -571,6 +579,9 @@ fn fix_comments(
     let mode_c = mode.clone();
     let task_c = task.clone();
     let intent_c = intent.clone();
+    // la corrección corre dentro del worktree del run ejecutado: ahí viven los
+    // cambios que revisó la verificación (ver run_fix_run en runner.rs)
+    let target_c = target.clone();
     let app2 = app.clone();
     let agent_c = agent.clone();
     let run_id_c = run_id.clone();
@@ -585,6 +596,7 @@ fn fix_comments(
             &mode_c,
             &ws,
             &intent_c,
+            Some(&target_c),
             agents_md.as_ref(),
         );
         let _ = app2.emit("run-finished", &run);
@@ -595,7 +607,7 @@ fn fix_comments(
         agent: agent.id.clone(),
         mode: "fix".into(),
         worktree: None,
-        worktree_path: None,
+        worktree_path: target.worktree_path.clone(),
         base_sha: None,
         checkpoint_sha: None,
         started_at: now_ms(),
