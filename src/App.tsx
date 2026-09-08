@@ -98,6 +98,14 @@ type ModalSpec = {
   onSubmit: (values: Record<string, string>) => void;
 };
 
+type ConfirmSpec = {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void;
+};
+
 // ---------- helpers ----------
 
 const fmtTime = (ms: number) =>
@@ -179,6 +187,37 @@ function FormModal(props: {
   );
 }
 
+function ConfirmModal(props: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+        <h3>{props.title}</h3>
+        <p className="modal-message">{props.message}</p>
+        <div className="modal-actions">
+          <button onClick={props.onClose}>Cancelar</button>
+          <button
+            className={props.danger ? "danger solid" : "primary"}
+            onClick={() => {
+              props.onConfirm();
+              props.onClose();
+            }}
+            autoFocus
+          >
+            {props.confirmLabel ?? "Confirmar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- app ----------
 
 export default function App() {
@@ -194,8 +233,10 @@ export default function App() {
   const [runMode, setRunMode] = useState("worktree");
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalSpec | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
 
   const openModal = useCallback((spec: ModalSpec) => setModal(spec), []);
+  const openConfirm = useCallback((spec: ConfirmSpec) => setConfirm(spec), []);
 
   const refreshWorkspace = useCallback(async () => {
     try {
@@ -319,6 +360,7 @@ export default function App() {
         setView={setView}
         projectPath={projectPath}
         tasks={tasks}
+        currentTaskId={current?.id ?? null}
         onOpenTask={openTask}
         onNewTask={async () => {
           openModal({
@@ -367,6 +409,7 @@ export default function App() {
             updateCurrent={updateCurrent}
             setError={setError}
             openModal={openModal}
+            openConfirm={openConfirm}
             refreshRuns={async () => {
               setRuns(await invoke<Run[]>("list_runs", { taskId: current.id }));
             }}
@@ -392,6 +435,16 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {confirm && (
+        <ConfirmModal
+          title={confirm.title}
+          message={confirm.message}
+          confirmLabel={confirm.confirmLabel}
+          danger={confirm.danger}
+          onConfirm={confirm.onConfirm}
+          onClose={() => setConfirm(null)}
+        />
+      )}
     </div>
   );
 }
@@ -400,9 +453,11 @@ export default function App() {
 
 function Onboarding({ onSaved }: { onSaved: (p: string) => void }) {
   const [path, setPath] = useState("");
+  const [err, setErr] = useState<string | null>(null);
   return (
     <div className="onboard">
       <h1>⚡ Nerve</h1>
+      {err && <div className="error-bar">{err} — click para cerrar</div>}
       <p>
         Workspace spec-first para agentes de código. Primero indica la carpeta
         de tu proyecto (idealmente un repositorio git):
@@ -420,7 +475,7 @@ function Onboarding({ onSaved }: { onSaved: (p: string) => void }) {
               const cfg = await invoke<{ projectPath: string | null }>("set_workspace", { path });
               onSaved(cfg.projectPath ?? path);
             } catch (e) {
-              alert(String(e));
+              setErr(String(e));
             }
           }}
         >
@@ -442,6 +497,7 @@ function Sidebar(props: {
   setView: (v: "home" | "task" | "settings") => void;
   projectPath: string | null;
   tasks: Task[];
+  currentTaskId: string | null;
   onOpenTask: (id: string) => void;
   onNewTask: () => Promise<void> | void;
   onOpenSettings: () => void;
@@ -459,7 +515,7 @@ function Sidebar(props: {
         {props.tasks.map((t) => (
           <div
             key={t.id}
-            className="item"
+            className={`item ${props.view === "task" && props.currentTaskId === t.id ? "active" : ""}`}
             onClick={() => props.onOpenTask(t.id)}
           >
             <div className="item-title">{t.title}</div>
@@ -471,7 +527,7 @@ function Sidebar(props: {
       </div>
       <div className="foot">
         <div className="mono small">{props.projectPath}</div>
-        <button onClick={props.onOpenSettings}>⚙ Ajustes</button>
+        <button className={props.view === "settings" ? "active-btn" : ""} onClick={props.onOpenSettings}>⚙ Ajustes</button>
       </div>
     </aside>
   );
@@ -528,6 +584,7 @@ function TaskView(props: {
   updateCurrent: (t: Task) => void;
   setError: (e: string) => void;
   openModal: (spec: ModalSpec) => void;
+  openConfirm: (spec: ConfirmSpec) => void;
   refreshRuns: () => Promise<void>;
 }) {
   const { task } = props;
@@ -708,6 +765,8 @@ function TaskView(props: {
             currentRun={props.currentRun}
             events={props.events}
             refreshRuns={props.refreshRuns}
+            openConfirm={props.openConfirm}
+            setError={props.setError}
           />
         </section>
       </div>
@@ -723,6 +782,8 @@ function RunsPanel(props: {
   currentRun: Run | null;
   events: RunEvent[];
   refreshRuns: () => Promise<void>;
+  openConfirm: (spec: ConfirmSpec) => void;
+  setError: (e: string) => void;
 }) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
@@ -770,11 +831,21 @@ function RunsPanel(props: {
             {r.worktreePath && r.status === "done" && (
               <button
                 className="danger"
-                onClick={async () => {
-                  if (window.confirm("¿Descartar el worktree (los cambios se pierden)?")) {
-                    await invoke("discard_worktree", { id: worktreeId(r) });
-                    props.refreshRuns();
-                  }
+                onClick={() => {
+                  props.openConfirm({
+                    title: "Descartar worktree",
+                    message: "Se borrará el worktree y su rama. Los cambios no fusionados se pierden.",
+                    confirmLabel: "Descartar",
+                    danger: true,
+                    onConfirm: async () => {
+                      try {
+                        await invoke("discard_worktree", { id: worktreeId(r) });
+                        await props.refreshRuns();
+                      } catch (e) {
+                        props.setError(String(e));
+                      }
+                    },
+                  });
                 }}
               >
                 Descartar
@@ -782,15 +853,20 @@ function RunsPanel(props: {
             )}
             {r.worktreePath && r.status === "done" && (
               <button
-                onClick={async () => {
-                  if (window.confirm("¿Fusionar el worktree en tu rama actual?")) {
-                    try {
-                      await invoke("merge_worktree", { id: worktreeId(r) });
-                      props.refreshRuns();
-                    } catch (e) {
-                      alert(String(e));
-                    }
-                  }
+                onClick={() => {
+                  props.openConfirm({
+                    title: "Fusionar worktree",
+                    message: "Se aplicará el diff del worktree sobre tu rama actual y se limpiará.",
+                    confirmLabel: "Fusionar",
+                    onConfirm: async () => {
+                      try {
+                        await invoke("merge_worktree", { id: worktreeId(r) });
+                        await props.refreshRuns();
+                      } catch (e) {
+                        props.setError(String(e));
+                      }
+                    },
+                  });
                 }}
               >
                 Fusionar
@@ -920,6 +996,7 @@ function Settings(props: {
 }) {
   const [path, setPath] = useState(props.projectPath ?? "");
   const [agents, setAgents] = useState<AgentsConfig>({ agents: [] });
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -943,14 +1020,16 @@ function Settings(props: {
             try {
               const cfg = await invoke<{ projectPath: string | null }>("set_workspace", { path });
               props.setProjectPath(cfg.projectPath);
+              setSaveMsg(`Guardado: ${cfg.projectPath ?? path}`);
             } catch (e) {
-              alert(String(e));
+              setSaveMsg(String(e));
             }
           }}
         >
           Guardar
         </button>
       </div>
+      {saveMsg && <div className="hint">{saveMsg}</div>}
 
       <h2>Ollama (modelos locales)</h2>
       <p className="hint">
