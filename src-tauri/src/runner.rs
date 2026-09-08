@@ -334,9 +334,12 @@ fn read_stream_codex(child: &mut KillChild, cancel: &CancelState, last_msg_path:
 }
 
 /// Lee stream-json del hijo hasta el evento result; devuelve (texto_final, session_id).
+/// Cada evento intermedio legible (texto parcial, uso de herramientas) se pasa
+/// a `on_event` en vivo para que la UI lo muestre mientras el agente trabaja.
 fn read_stream(
     child: &mut KillChild,
     cancel: &CancelState,
+    mut on_event: impl FnMut(String),
 ) -> Result<(String, Option<String>), String> {
     let stdout = child
         .0
@@ -363,6 +366,9 @@ fn read_stream(
         let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        if let Some(desc) = describe_stream_event(&v) {
+            on_event(desc);
+        }
         match v.get("type").and_then(Value::as_str) {
             Some("system") => {
                 if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
@@ -397,6 +403,58 @@ fn read_stream(
         }
     }
     Ok((final_text, session_id))
+}
+
+/// Resumen legible de un evento intermedio del stream (funciona con el formato
+/// de qwen/claude/gemini: bloques de texto y tool_use dentro de "assistant").
+fn describe_stream_event(v: &Value) -> Option<String> {
+    let ty = v.get("type").and_then(Value::as_str)?;
+    match ty {
+        "assistant" => {
+            let arr = v.pointer("/message/content").and_then(Value::as_array)?;
+            let mut parts: Vec<String> = Vec::new();
+            for item in arr {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        let t = item.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                        if !t.is_empty() {
+                            parts.push(t.chars().take(200).collect());
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = item.get("name").and_then(Value::as_str).unwrap_or("herramienta");
+                        let brief = tool_input_brief(item.get("input"));
+                        if brief.is_empty() {
+                            parts.push(format!("→ {}", name));
+                        } else {
+                            parts.push(format!("→ {} {}", name, brief));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if parts.is_empty() { None } else { Some(parts.join(" · ")) }
+        }
+        // qwen/gemini usan tool_use a nivel raíz en algunos eventos
+        "tool_use" => {
+            let name = v.get("name").and_then(Value::as_str).unwrap_or("herramienta");
+            let brief = tool_input_brief(v.get("input").or_else(|| v.get("args")));
+            Some(if brief.is_empty() { format!("→ {}", name) } else { format!("→ {} {}", name, brief) })
+        }
+        _ => None,
+    }
+}
+
+/// Primer campo descriptivo del input de una herramienta (archivo, comando…).
+fn tool_input_brief(input: Option<&Value>) -> String {
+    let Some(Value::Object(m)) = input else { return String::new() };
+    for k in ["file_path", "path", "command", "pattern", "url", "description", "prompt"] {
+        if let Some(Value::String(s)) = m.get(k) {
+            let s = s.replace('\n', " ");
+            return s.chars().take(120).collect();
+        }
+    }
+    String::new()
 }
 
 pub struct RunPaths {
@@ -528,7 +586,13 @@ pub fn run_plan(
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
                 *cancel.pid.lock().unwrap() = Some(pid);
-                read_stream(&mut child, &cancel)
+                let app3 = app.clone();
+                let store3 = store.clone();
+                let tid3 = task.id.clone();
+                let rid3 = run_id.to_string();
+                read_stream(&mut child, &cancel, move |desc| {
+                    emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                })
             });
             let _ = fs::remove_file(&prompt_file);
             let (text, sid) = res?;
@@ -747,7 +811,14 @@ pub fn run_exec(
                 let res = spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
                     *cancel.pid.lock().unwrap() = Some(pid);
-                    read_stream(&mut child, &cancel)
+                    let app3 = app.clone();
+                    let store3 = store.clone();
+                    let tid3 = task.id.clone();
+                    let rid3 = run_id.to_string();
+                    let tid4 = t.id.clone();
+                    read_stream(&mut child, &cancel, move |desc| {
+                        emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), Some(tid4.clone()));
+                    })
                 });
                 let _ = fs::remove_file(&prompt_file);
                 let (text, sid) = res?;

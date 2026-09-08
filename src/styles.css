@@ -290,6 +290,7 @@ button.block { width: 100%; margin-top: 8px; }
 .log-checkpoint, .log-verify { color: var(--ok); }
 .log-ticket-start { color: var(--blue); font-weight: 600; }
 .log-info { color: var(--muted); }
+.log-stream { color: var(--text-soft, #aab3c5); border-left: 2px solid var(--accent-soft, #2a3040); padding-left: 8px; }
 .log-warn { color: var(--warn); }
 .log-line .mono { color: var(--muted); margin-right: 6px; }
 

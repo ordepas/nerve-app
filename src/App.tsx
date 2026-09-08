@@ -54,6 +54,7 @@ interface Run {
   status: string;
   sessionId: string | null;
   summary: string | null;
+  events?: RunEvent[];
 }
 
 interface FileChange {
@@ -285,6 +286,10 @@ export default function App() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  // runId del log activo: distingue historial del run anterior vs stream nuevo
+  const logRunId = useRef<string>("");
+  // task actualmente abierta: filtra eventos de runs de otras tasks
+  const currentTaskIdRef = useRef<string>("");
   const [agents, setAgents] = useState<AgentDef[]>([]);
   const [selectedAgent, setSelectedAgent] = useState("mock");
   const [runMode, setRunMode] = useState("worktree");
@@ -341,10 +346,17 @@ export default function App() {
     setError(null);
     try {
       const t = await invoke<Task>("get_task", { id });
+      currentTaskIdRef.current = id;
       setCurrent(t);
       const rs = await invoke<Run[]>("list_runs", { taskId: id });
       setRuns(rs);
       setEvents([]);
+      // historial del run más reciente (el stream en vivo se añade encima)
+      const latest = rs[0];
+      logRunId.current = latest ? latest.id : "";
+      if (latest && latest.events && latest.events.length > 0) {
+        setEvents(latest.events.map((ev) => ({ ...ev, text: ev.text })));
+      }
       setCurrentRun(null);
       setView("task");
     } catch (e) {
@@ -357,6 +369,12 @@ export default function App() {
     const unsubs: Array<() => void> = [];
     void (async () => {
       const l1 = await listen<{ taskId: string; runId: string; event: RunEvent }>("run-event", (e) => {
+        if (e.payload.taskId !== currentTaskIdRef.current) return;
+        if (logRunId.current !== e.payload.runId) {
+          // run nuevo: el log empieza de cero
+          logRunId.current = e.payload.runId;
+          setEvents([]);
+        }
         setEvents((prev) => [...prev, e.payload.event]);
       });
       const l2 = await listen<{ taskId: string; runId: string; spec: string; tickets: string }>("run-plan", (e) => {
@@ -1134,9 +1152,8 @@ function RunsPanel(props: {
         />
       )}
 
-      {lastRun && lastRun.status === "running" && (
+      {liveEvents.length > 0 && (
         <div className="log" ref={logRef}>
-          {liveEvents.length === 0 && <div className="empty">Esperando eventos…</div>}
           {liveEvents.map((ev, i) => (
             <div key={i} className={`log-line log-${ev.kind}`}>
               {props.techMode && <span className="mono">{ev.kind}</span>} {ev.text}
