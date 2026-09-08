@@ -263,11 +263,22 @@ export default function App() {
         setRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)]);
         setCurrentRun(run);
       });
+      const l4 = await listen<Task>("task-updated", (e) => {
+        const t = e.payload;
+        setCurrent((prev) => (prev?.id === t.id ? t : prev));
+        setTasks((prev) => {
+          const i = prev.findIndex((x) => x.id === t.id);
+          if (i < 0) return prev;
+          const copy = [...prev];
+          copy[i] = t;
+          return copy;
+        });
+      });
       if (disposed) {
-        [l1, l2, l3].forEach((l) => l());
+        [l1, l2, l3, l4].forEach((l) => l());
         return;
       }
-      unsubs.push(l1, l2, l3);
+      unsubs.push(l1, l2, l3, l4);
     })();
     return () => {
       disposed = true;

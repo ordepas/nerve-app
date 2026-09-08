@@ -98,6 +98,8 @@ button.block { width: 100%; margin-top: 8px; }
 .ticket ul { margin: 4px 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
 .ticket-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .ticket-actions button { padding: 4px 8px; font-size: 12px; }
+.ticket.done { border-color: #22c55e; }
+.ticket.blocked { border-color: #ef4444; }
 
 /* ---------- runs ---------- */
 .runs { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
@@ -106,6 +108,7 @@ button.block { width: 100%; margin-top: 8px; }
 .log-line { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
 .log-error { color: #fca5a5; }
 .log-checkpoint { color: #86efac; }
+.log-verify { color: #86efac; }
 .log-ticket-start { color: #93c5fd; font-weight: 600; }
 .log-info { color: var(--muted); }
 .log-line .mono { color: var(--muted); margin-right: 6px; }

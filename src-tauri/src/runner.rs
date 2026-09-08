@@ -127,6 +127,63 @@ pub fn resolve_agent<'a>(agents: &'a [AgentDef], id: &str) -> Result<AgentDef, S
     Ok(a.clone())
 }
 
+/// Ejecuta el verify_command del ticket y devuelve (exit_code, salida).
+/// Vía .bat temporal para preservar el quoting del comando (ver ollama.rs).
+#[cfg(windows)]
+fn run_verify(cwd: &Path, command: &str) -> (i32, String) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let bat = std::env::temp_dir().join(format!(
+        "nerve-verify-{}-{}.bat",
+        now_ms(),
+        std::process::id()
+    ));
+    if fs::write(&bat, format!("@echo off\r\n{}\r\n", command)).is_err() {
+        let out = Command::new("cmd")
+            .args(["/d", "/s", "/c", command])
+            .current_dir(cwd)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        return match out {
+            Ok(o) => (
+                o.status.code().unwrap_or(-1),
+                format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            ),
+            Err(e) => (-1, format!("no se pudo lanzar el comando: {}", e)),
+        };
+    }
+    let out = Command::new("cmd")
+        .arg("/d")
+        .arg("/c")
+        .arg(bat.to_string_lossy().to_string())
+        .current_dir(cwd)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = fs::remove_file(&bat);
+    match out {
+        Ok(o) => (
+            o.status.code().unwrap_or(-1),
+            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        ),
+        Err(e) => (-1, format!("no se pudo lanzar el comando: {}", e)),
+    }
+}
+
+#[cfg(not(windows))]
+fn run_verify(cwd: &Path, command: &str) -> (i32, String) {
+    let out = Command::new("sh")
+        .args(["-c", command])
+        .current_dir(cwd)
+        .output();
+    match out {
+        Ok(o) => (
+            o.status.code().unwrap_or(-1),
+            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        ),
+        Err(e) => (-1, format!("no se pudo lanzar el comando: {}", e)),
+    }
+}
+
 /// Escribe el prompt en un archivo temporal (lo pasamos por stdin para evitar
 /// problemas de quoting y saltos de línea en cmd.exe).
 fn write_prompt_file(prompt: &str) -> Result<PathBuf, String> {
@@ -646,7 +703,57 @@ pub fn run_exec(
             emit(&app, store, &task.id, run_id, "checkpoint", Some(sha), Some(t.id.clone()));
         }
 
-        run.summary = Some(format!("{} ticket(s) ejecutados", approved.len()));
+        // Verificación automática: corre el verify_command de cada ticket
+        // ejecutado y marca done (exit 0) o blocked (fallo) persistiendo la task.
+        let mut verified = 0usize;
+        let mut failed = 0usize;
+        for t in &approved {
+            let Some(cmd) = &t.verify_command else { continue };
+            if cmd.trim().is_empty() {
+                continue;
+            }
+            if cancel.cancelled() {
+                return Err("__cancelled__".into());
+            }
+            emit(&app, store, &task.id, run_id, "info", Some(format!("✔ Verificando {}: {}", t.id, cmd)), Some(t.id.clone()));
+            let (code, out) = run_verify(&cwd, cmd);
+            let ok = code == 0;
+            let verdict = if ok { "done" } else { "blocked" };
+            if ok { verified += 1 } else { failed += 1 }
+            emit(
+                &app,
+                store,
+                &task.id,
+                run_id,
+                if ok { "verify" } else { "error" },
+                Some(format!(
+                    "{} verificación {}: exit={} — {}",
+                    t.id,
+                    if ok { "OK" } else { "FALLÓ" },
+                    code,
+                    out.trim().chars().take(400).collect::<String>()
+                )),
+                Some(t.id.clone()),
+            );
+            let mut fresh = store.load_task(&task.id)?;
+            if let Some(slot) = fresh.tickets.iter_mut().find(|x| x.id == t.id) {
+                slot.status = verdict.to_string();
+            }
+            fresh.updated_at = now_ms();
+            store.save_task(&fresh)?;
+            let _ = app.emit("task-updated", &fresh);
+        }
+
+        run.summary = Some(if verified + failed > 0 {
+            format!(
+                "{} ticket(s) ejecutados; verificación: {} ok, {} fallido(s)",
+                approved.len(),
+                verified,
+                failed
+            )
+        } else {
+            format!("{} ticket(s) ejecutados", approved.len())
+        });
         Ok(())
     })();
 

@@ -9,9 +9,11 @@ pub struct Ticket {
     pub description: String,
     #[serde(default)]
     pub acceptance: Vec<String>,
-    #[serde(default)]
+    // alias snake_case: los agentes devuelven verify_command/depends_on en el
+    // bloque JSON (el prompt lo pide así) y sin el alias se descartaban
+    #[serde(default, alias = "verify_command")]
     pub verify_command: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "depends_on")]
     pub depends_on: Vec<String>,
     #[serde(default = "default_ticket_status")]
     pub status: String, // todo | in_dev | done | blocked
