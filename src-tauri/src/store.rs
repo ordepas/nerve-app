@@ -53,7 +53,7 @@ impl Store {
         let p = self.root.join("config").join("agents.json");
         if p.exists() {
             let mut cfg: AgentsConfig = self.read_json(&p)?;
-            // migración: añade el agente Ollama a configs creadas antes de su integración
+            // migración: agente Ollama (integrado después de la fase 1)
             if !cfg.agents.iter().any(|a| a.id == "ollama") {
                 cfg.agents.push(AgentDef {
                     id: "ollama".into(),
@@ -65,6 +65,35 @@ impl Store {
                     exec_args: vec![],
                 });
                 self.write_json(&p, &cfg)?;
+            }
+            // migración fase 2: reemplaza claude/codex deshabilitados (placeholder) por
+            // las definiciones reales, y añade gemini si falta
+            let stale: Vec<String> = cfg
+                .agents
+                .iter()
+                .filter(|a| (a.id == "claude" || a.id == "codex") && (a.kind == "disabled" || !a.enabled))
+                .map(|a| a.id.clone())
+                .collect();
+            if !stale.is_empty() {
+                let fresh: AgentsConfig =
+                    serde_json::from_str("{}").map_err(|e| e.to_string())?;
+                for id in stale {
+                    if let Some(d) = fresh.agents.iter().find(|a| a.id == id) {
+                        match cfg.agents.iter_mut().find(|a| a.id == id) {
+                            Some(slot) => *slot = d.clone(),
+                            None => cfg.agents.push(d.clone()),
+                        }
+                    }
+                }
+                self.write_json(&p, &cfg)?;
+            }
+            if !cfg.agents.iter().any(|a| a.id == "gemini") {
+                let fresh: AgentsConfig =
+                    serde_json::from_str("{}").map_err(|e| e.to_string())?;
+                if let Some(d) = fresh.agents.iter().find(|a| a.id == "gemini") {
+                    cfg.agents.push(d.clone());
+                    self.write_json(&p, &cfg)?;
+                }
             }
             Ok(cfg)
         } else {

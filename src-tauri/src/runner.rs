@@ -161,6 +161,32 @@ fn spawn_agent(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>
         .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))
 }
 
+/// Igual que spawn_agent pero mantiene stdin ABIERTO (requerido por codex exec).
+#[cfg(windows)]
+fn spawn_agent_codex(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>) -> Result<KillChild, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/c").arg(bin).args(args);
+    cmd.current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    let mut child = cmd
+        .spawn()
+        .map(KillChild)
+        .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))?;
+    if let Some(f) = stdin_file {
+        let mut fh = fs::File::open(f).map_err(|e| e.to_string())?;
+        let mut stdin = child.0.stdin.take().ok_or("sin stdin del hijo")?;
+        std::io::copy(&mut fh, &mut stdin).map_err(|e| e.to_string())?;
+        drop(stdin); // EOF: codex procede
+    } else {
+        drop(child.0.stdin.take());
+    }
+    Ok(child)
+}
+
 #[cfg(not(windows))]
 fn spawn_agent(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>) -> Result<KillChild, String> {
     let mut cmd = Command::new(bin);
@@ -180,6 +206,74 @@ fn spawn_agent(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>
     cmd.spawn()
         .map(KillChild)
         .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))
+}
+
+#[cfg(not(windows))]
+fn spawn_agent_codex(bin: &str, args: &[String], cwd: &Path, stdin_file: Option<&Path>) -> Result<KillChild, String> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map(KillChild)
+        .map_err(|e| format!("no se pudo lanzar {}: {}", bin, e))?;
+    if let Some(f) = stdin_file {
+        let mut fh = fs::File::open(f).map_err(|e| e.to_string())?;
+        let mut stdin = child.0.stdin.take().ok_or("sin stdin del hijo")?;
+        std::io::copy(&mut fh, &mut stdin).map_err(|e| e.to_string())?;
+        drop(stdin);
+    } else {
+        drop(child.0.stdin.take());
+    }
+    Ok(child)
+}
+
+/// Lee el stream JSONL de codex exec --json. La respuesta final llega vía el
+/// archivo de --output-last-message; usamos los eventos solo para el session id.
+fn read_stream_codex(child: &mut KillChild, cancel: &CancelState, last_msg_path: &Path) -> Result<(String, Option<String>), String> {
+    let stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or("no se pudo leer stdout del agente")?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut session_id: Option<String> = None;
+    loop {
+        if cancel.cancelled() {
+            return Err("__cancelled__".into());
+        }
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if let Some(id) = v.get("thread_id").and_then(Value::as_str).or_else(|| v.get("session_id").and_then(Value::as_str)) {
+            session_id = Some(id.to_string());
+        }
+        if v.get("type").and_then(Value::as_str) == Some("error") {
+            return Err(format!("codex: {}", v.get("message").and_then(Value::as_str).unwrap_or("error desconocido")));
+        }
+    }
+    if !child.0.wait().map(|s| s.success()).unwrap_or(false) {
+        // aun con exit != 0, si hay mensaje final lo aprovechamos; si no, error
+        let text = fs::read_to_string(last_msg_path).unwrap_or_default();
+        if text.trim().is_empty() {
+            return Err("codex terminó con error (ver log)".into());
+        }
+        return Ok((text, session_id));
+    }
+    let text = fs::read_to_string(last_msg_path).unwrap_or_default();
+    Ok((text, session_id))
 }
 
 /// Lee stream-json del hijo hasta el evento result; devuelve (texto_final, session_id).
@@ -325,6 +419,24 @@ pub fn run_plan(
                 emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
                 Ok(())
             })?;
+            let tickets =
+                extract_json_block(&text).ok_or("el agente no devolvió el bloque JSON de tickets")?;
+            (text.clone(), tickets.to_string())
+        } else if agent.kind == "codex" {
+            let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
+            let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+            let mut args: Vec<String> = agent.plan_args.clone();
+            args.push("--output-last-message".into());
+            args.push(last_msg.to_string_lossy().to_string());
+            let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                read_stream_codex(&mut child, &cancel, &last_msg)
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let _ = fs::remove_file(&last_msg);
+            let (text, sid) = res?;
+            run.session_id = sid;
             let tickets =
                 extract_json_block(&text).ok_or("el agente no devolvió el bloque JSON de tickets")?;
             (text.clone(), tickets.to_string())
@@ -475,6 +587,33 @@ pub fn run_exec(
                         Some("el agente no imprimió NERVE_RUN_COMPLETE; se hace checkpoint igualmente".into()),
                         Some(t.id.clone()),
                     );
+                }
+                text
+            } else if agent.kind == "codex" {
+                let prompt_file = write_prompt_file(&exec_prompt(
+                    &task.title,
+                    &[(
+                        t.id.clone(),
+                        t.title.clone(),
+                        t.description.clone(),
+                        t.acceptance.clone(),
+                        t.verify_command.clone(),
+                    )],
+                ))?;
+                let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+                let mut args: Vec<String> = agent.exec_args.clone();
+                args.push("--output-last-message".into());
+                args.push(last_msg.to_string_lossy().to_string());
+                let res = spawn_agent_codex(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
+                    let pid = child.0.id();
+                    *cancel.pid.lock().unwrap() = Some(pid);
+                    read_stream_codex(&mut child, &cancel, &last_msg)
+                });
+                let _ = fs::remove_file(&prompt_file);
+                let _ = fs::remove_file(&last_msg);
+                let (text, sid) = res?;
+                if sid.is_some() {
+                    run.session_id = sid;
                 }
                 text
             } else {

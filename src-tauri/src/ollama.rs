@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::model::OllamaModelInfo;
+use crate::store::now_ms;
 
 const DEFAULT_URL: &str = "http://localhost:11434";
 
@@ -398,12 +400,32 @@ fn tool_delete_file(cwd: &Path, args: &Value) -> String {
 fn run_command_raw(cwd: &Path, command: &str) -> std::process::Output {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("cmd")
-        .args(["/d", "/s", "/c", command])
+    // Se ejecuta vía .bat temporal: preserva las comillas internas del comando
+    // (cmd /s /c rompe el quoting de args con comillas dobles).
+    let bat = std::env::temp_dir().join(format!(
+        "nerve-cmd-{}-{}.bat",
+        now_ms(),
+        std::process::id()
+    ));
+    if fs::write(&bat, format!("@echo off\r\n{}\r\n", command)).is_err() {
+        // fallback: ejecución directa
+        return std::process::Command::new("cmd")
+            .args(["/d", "/s", "/c", command])
+            .current_dir(cwd)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .expect("run_command: no se pudo lanzar el proceso");
+    }
+    let out = std::process::Command::new("cmd")
+        .arg("/d")
+        .arg("/c")
+        .arg(bat.to_string_lossy().to_string())
         .current_dir(cwd)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .expect("run_command: no se pudo lanzar el proceso")
+        .expect("run_command: no se pudo lanzar el proceso");
+    let _ = fs::remove_file(&bat);
+    out
 }
 
 #[cfg(not(windows))]
