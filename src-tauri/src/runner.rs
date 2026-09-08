@@ -553,6 +553,12 @@ pub fn run_plan(
             "run-plan",
             json!({"taskId": task.id, "runId": run_id, "spec": spec, "tickets": tickets_json}),
         );
+        // la task queda esperando aprobación del plan generado
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.status = "ready".into();
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
         Ok(())
     })();
 
@@ -648,6 +654,12 @@ pub fn run_exec(
         if approved.is_empty() {
             return Err("no hay tickets aprobados pendientes".into());
         }
+        // la task entra en construcción mientras corre la ejecución
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.status = "in_dev".into();
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
 
         for t in &approved {
             if cancel.cancelled() {
@@ -801,6 +813,27 @@ pub fn run_exec(
         } else {
             format!("{} ticket(s) ejecutados", approved.len())
         });
+        // tickets sin verify_command quedan done al ejecutarse; si todos
+        // terminaron, la task se completa (y si algo falló, blocked)
+        let mut fresh = store.load_task(&task.id)?;
+        if verified + failed == 0 {
+            for t in &approved {
+                if let Some(slot) = fresh.tickets.iter_mut().find(|x| x.id == t.id) {
+                    slot.status = "done".into();
+                }
+            }
+        }
+        let all_done = !fresh.tickets.is_empty() && fresh.tickets.iter().all(|t| t.status == "done");
+        fresh.status = if fresh.tickets.iter().any(|t| t.status == "blocked") {
+            "blocked".into()
+        } else if all_done {
+            "done".into()
+        } else {
+            "in_dev".into()
+        };
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
         Ok(())
     })();
 

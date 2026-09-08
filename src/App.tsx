@@ -376,6 +376,15 @@ export default function App() {
         const run = e.payload;
         setRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)]);
         setCurrentRun(run);
+        // carreras de escritura del store: recargar runs al terminar
+        void (async () => {
+          try {
+            const rs = await invoke<Run[]>("list_runs", { taskId: run.taskId });
+            setRuns(rs);
+          } catch {
+            /* noop */
+          }
+        })();
       });
       const l4 = await listen<Task>("task-updated", (e) => {
         const t = e.payload;
@@ -962,11 +971,11 @@ function ApprovalHero(props: {
   busy: boolean;
 }) {
   const message =
-    props.count === 0
-      ? props.total === 0
-        ? "Cuando el plan esté listo, verás aquí los cambios propuestos para aprobar."
-        : "No hay cambios esperando aprobación."
-      : undefined;
+    props.total === 0
+      ? "Cuando el plan esté listo, verás aquí los cambios propuestos para aprobar."
+      : props.count === 0
+        ? "Marca los cambios que quieras construir:"
+        : undefined;
   return (
     <div className="approval-hero">
       <div className="approval-head">
@@ -977,9 +986,8 @@ function ApprovalHero(props: {
           </button>
         )}
       </div>
-      {message ? (
-        <p className="modal-message">{message}</p>
-      ) : (
+      {message && <p className="modal-message">{message}</p>}
+      {props.total > 0 && (
         <ul className="approval-list">
           {props.tickets.map((tk) => (
             <li key={tk.id} className={tk.approved ? "ok" : ""}>
