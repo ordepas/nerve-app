@@ -532,10 +532,15 @@ function TaskView(props: {
 }) {
   const { task } = props;
   const approvedPending = task.tickets.filter((t) => t.approved && t.status !== "done");
+  const [resumeSession, setResumeSession] = useState(false);
+  // resume disponible si el agente elegido ya corrió con éxito en esta task
+  const lastRunSameAgent = props.runs.find((r) => r.agent === props.selectedAgent && r.status === "done" && r.sessionId);
+  const canResume = (props.selectedAgent === "qwen" || props.selectedAgent === "claude") && !!lastRunSameAgent;
+  const wantResume = canResume && resumeSession;
 
   const runPlan = async () => {
     try {
-      await invoke("start_plan_run", { taskId: task.id, agentId: props.selectedAgent, mode: "workspace" });
+      await invoke("start_plan_run", { taskId: task.id, agentId: props.selectedAgent, mode: "workspace", resumeSession: wantResume });
       props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
@@ -544,7 +549,7 @@ function TaskView(props: {
 
   const runExec = async () => {
     try {
-      await invoke("start_exec_run", { taskId: task.id, agentId: props.selectedAgent, mode: props.runMode });
+      await invoke("start_exec_run", { taskId: task.id, agentId: props.selectedAgent, mode: props.runMode, resumeSession: wantResume });
       props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
@@ -627,6 +632,16 @@ function TaskView(props: {
           <option value="workspace">Ejecutar en workspace (directo)</option>
         </select>
         <button className="primary" onClick={runPlan}>🧠 Generar spec y plan</button>
+        {canResume && (
+          <label className="mono small" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={resumeSession}
+              onChange={(e) => setResumeSession(e.target.checked)}
+            />
+            ↩ continuar sesión ({lastRunSameAgent!.sessionId!.slice(0, 8)})
+          </label>
+        )}
         <button
           className="primary"
           onClick={runExec}

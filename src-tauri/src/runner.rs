@@ -443,8 +443,25 @@ pub fn run_plan(
     agent: &AgentDef,
     _mode: &str,
     ws: &Path,
+    resume_session: bool,
 ) -> Run {
     let cancel = register_run(registry, run_id);
+    // --resume: continúa la sesión previa del mismo agente en esta task
+    // (solo qwen -r / claude --resume; mock/ollama no tienen sesiones)
+    let resume_id: Option<String> = if resume_session
+        && (agent.kind == "qwen" || agent.kind == "claude")
+    {
+        store
+            .list_runs(&task.id)
+            .ok()
+            .and_then(|runs| {
+                runs.iter()
+                    .find(|r| r.agent == agent.id && r.status == "done" && r.session_id.is_some())
+                    .and_then(|r| r.session_id.clone())
+            })
+    } else {
+        None
+    };
     let mut run = Run {
         id: run_id.to_string(),
         task_id: task.id.clone(),
@@ -465,6 +482,9 @@ pub fn run_plan(
 
     let result: Result<(), String> = (|| {
         emit(&app, store, &task.id, run_id, "info", Some("Generando spec y plan…".into()), None);
+        if let Some(sid) = &resume_id {
+            emit(&app, store, &task.id, run_id, "info", Some(format!("↩ continuando sesión previa del agente ({})", sid)), None);
+        }
         let (spec, tickets_json) = if agent.kind == "mock" {
             mock_agent::plan_output(&task.intent)
         } else if agent.kind == "ollama" {
@@ -499,7 +519,12 @@ pub fn run_plan(
             (text.clone(), tickets.to_string())
         } else {
             let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
-            let args: Vec<String> = agent.plan_args.clone();
+            let mut args: Vec<String> = agent.plan_args.clone();
+            // qwen: -r <id> · claude: --resume <id> (flag con valor separado)
+            if let Some(sid) = &resume_id {
+                args.push("-r".into());
+                args.push(sid.clone());
+            }
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
                 *cancel.pid.lock().unwrap() = Some(pid);
@@ -541,6 +566,7 @@ pub fn run_plan(
 }
 
 /// Ejecución de tickets aprobados: cada ticket corre aislado y termina en checkpoint.
+#[allow(clippy::too_many_arguments)]
 pub fn run_exec(
     app: AppHandle,
     store: &Store,
@@ -550,8 +576,25 @@ pub fn run_exec(
     agent: &AgentDef,
     mode: &str,
     ws: &Path,
+    resume_session: bool,
 ) -> Run {
     let cancel = register_run(registry, run_id);
+    // resume solo en modo workspace: cada worktree nuevo es un contexto distinto
+    let resume_id: Option<String> = if resume_session
+        && mode == "workspace"
+        && (agent.kind == "qwen" || agent.kind == "claude")
+    {
+        store
+            .list_runs(&task.id)
+            .ok()
+            .and_then(|runs| {
+                runs.iter()
+                    .find(|r| r.agent == agent.id && r.status == "done" && r.session_id.is_some())
+                    .and_then(|r| r.session_id.clone())
+            })
+    } else {
+        None
+    };
     let mut run = Run {
         id: run_id.to_string(),
         task_id: task.id.clone(),
@@ -684,7 +727,11 @@ pub fn run_exec(
                         t.verify_command.clone(),
                     )],
                 ))?;
-                let args: Vec<String> = agent.exec_args.clone();
+                let mut args: Vec<String> = agent.exec_args.clone();
+                if let Some(sid) = &resume_id {
+                    args.push("-r".into());
+                    args.push(sid.clone());
+                }
                 let res = spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
                     *cancel.pid.lock().unwrap() = Some(pid);

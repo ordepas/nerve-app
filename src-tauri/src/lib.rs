@@ -208,6 +208,7 @@ fn spawn_run(
     agent_id: String,
     mode: String,
     kind: &str,
+    resume_session: bool,
 ) -> Result<Run, String> {
     let task = state.store.load_task(&task_id)?;
     if matches!(kind, "exec") {
@@ -234,9 +235,9 @@ fn spawn_run(
     let app2 = app.clone();
     std::thread::spawn(move || {
         let run = if kind == "plan" {
-            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws)
+            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session)
         } else {
-            runner::run_exec(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws)
+            runner::run_exec(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session)
         };
         let _ = app2.emit("run-finished", &run);
     });
@@ -265,9 +266,10 @@ fn start_plan_run(
     task_id: String,
     agent_id: String,
     mode: String,
+    resume_session: Option<bool>,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    spawn_run(app, &state, task_id, agent_id, mode, "plan")
+    spawn_run(app, &state, task_id, agent_id, mode, "plan", resume_session.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -276,9 +278,10 @@ fn start_exec_run(
     task_id: String,
     agent_id: String,
     mode: String,
+    resume_session: Option<bool>,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    spawn_run(app, &state, task_id, agent_id, mode, "exec")
+    spawn_run(app, &state, task_id, agent_id, mode, "exec", resume_session.unwrap_or(false))
 }
 
 // ---------- diff / git ----------
