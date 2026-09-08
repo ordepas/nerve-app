@@ -39,6 +39,10 @@ pub struct EpicDef {
     // qué se está aprobando en el gate: master | plan | fase
     #[serde(default)]
     pub gate: String,
+    // YOLO: el motor no se detiene en gates; planifica, aprueba y construye
+    // sin intervención humana hasta terminar o fallar
+    #[serde(default)]
+    pub yolo: bool,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -123,6 +127,7 @@ fn new_task(store: &Store, title: &str, intent: &str) -> Result<Task, String> {
         spec_current: None,
         spec_versions: Vec::new(),
         tickets: Vec::new(),
+        review_comments: Vec::new(),
     };
     store.save_task(&task)?;
     Ok(task)
@@ -148,11 +153,24 @@ pub fn create_epic(
         current_stage: 0,
         status: "draft".into(),
         gate: String::new(),
+        yolo: false,
         last_error: None,
         current_run: None,
         created_at: now,
         updated_at: now,
     };
+    save_epic(store, &epic)?;
+    Ok(epic)
+}
+
+/// Activa o desactiva el modo YOLO de un epic (solo cuando no está corriendo).
+pub fn set_epic_yolo(store: &Store, epic_id: &str, yolo: bool) -> Result<EpicDef, String> {
+    let mut epic = load_epic(store, epic_id)?;
+    if epic.status == "running" {
+        return Err("no se puede cambiar YOLO mientras el epic está corriendo".into());
+    }
+    epic.yolo = yolo;
+    epic.updated_at = now_ms();
     save_epic(store, &epic)?;
     Ok(epic)
 }
@@ -407,6 +425,7 @@ fn plan_one(
     task: &Task,
 ) -> Result<Run, String> {
     let (agent, ws) = agent_and_ws(store, &epic.agent_id)?;
+    let md = crate::agents_md::load(&ws, store);
     let run_id = new_id("run");
     epic.current_run = Some(run_id.clone());
     epic.updated_at = now_ms();
@@ -423,6 +442,7 @@ fn plan_one(
         &ws,
         false,
         &epic.skill_id,
+        md.as_ref(),
     );
     epic.current_run = None;
     epic.updated_at = now_ms();
@@ -440,6 +460,7 @@ fn exec_one(
     task: &Task,
 ) -> Result<Run, String> {
     let (agent, ws) = agent_and_ws(store, &epic.agent_id)?;
+    let md = crate::agents_md::load(&ws, store);
     let run_id = new_id("run");
     epic.current_run = Some(run_id.clone());
     epic.updated_at = now_ms();
@@ -455,6 +476,7 @@ fn exec_one(
         "worktree",
         &ws,
         false,
+        md.as_ref(),
     );
     epic.current_run = None;
     epic.updated_at = now_ms();
@@ -463,21 +485,26 @@ fn exec_one(
     Ok(run)
 }
 
+/// Coloca el gate y pide parar (true); con YOLO devuelve false para seguir.
 fn gate_if_running(
     app: &AppHandle,
     store: &Store,
     epic: &mut EpicDef,
     gate: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if load_epic(store, &epic.id)?.status == "cancelled" {
-        return Ok(());
+        return Ok(false);
+    }
+    if epic.yolo {
+        // YOLO: los gates se saltan; el epic sigue hasta terminar o fallar
+        return Ok(false);
     }
     set_status(store, epic, "awaiting_gate", None)?;
     epic.gate = gate.to_string();
     epic.updated_at = now_ms();
     save_epic(store, epic)?;
     let _ = app.emit("epic-updated", &*epic);
-    Ok(())
+    Ok(true)
 }
 
 /// Cierra un run dentro del motor: true = seguir; false = parar (ya marcado).
@@ -541,8 +568,10 @@ fn engine_loop(
             };
             epic.stages = stages_from_tickets(store, &tickets)?;
             epic.current_stage = 0;
-            gate_if_running(&app, store, &mut epic, "master")?;
-            return Ok(());
+            if gate_if_running(&app, store, &mut epic, "master")? {
+                return Ok(());
+            }
+            continue;
         }
 
         // 2) fase en curso
@@ -610,8 +639,10 @@ fn engine_loop(
                         store.save_task(&f2)?;
                         let _ = app.emit("task-updated", &f2);
                     }
-                    gate_if_running(&app, store, &mut epic, "plan")?;
-                    return Ok(());
+                    if gate_if_running(&app, store, &mut epic, "plan")? {
+                        return Ok(());
+                    }
+                    continue;
                 }
             }
         }
@@ -654,8 +685,10 @@ fn engine_loop(
                         )?;
                         return Ok(());
                     }
-                    gate_if_running(&app, store, &mut epic, "fase")?;
-                    return Ok(());
+                    if gate_if_running(&app, store, &mut epic, "fase")? {
+                        return Ok(());
+                    }
+                    continue;
                 }
             }
         }
@@ -671,7 +704,9 @@ fn engine_loop(
             continue;
         }
         // nada pendiente pero no todo done: parar para revisión humana
-        gate_if_running(&app, store, &mut epic, "fase")?;
-        return Ok(());
+        if gate_if_running(&app, store, &mut epic, "fase")? {
+            return Ok(());
+        }
+        continue;
     }
 }

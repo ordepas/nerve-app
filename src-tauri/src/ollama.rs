@@ -207,6 +207,53 @@ pub fn run_exec(
     Err("el agente Ollama excedió el máximo de rondas de herramientas".into())
 }
 
+/// Prompt de solo lectura (p. ej. verificación) con herramientas de lectura;
+/// devuelve el texto final. El callback puede devolver Err para abortar.
+pub fn run_read_prompt(
+    url: &str,
+    model: &str,
+    prompt: &str,
+    cwd: &Path,
+    mut on_event: impl FnMut(String) -> Result<(), String>,
+) -> Result<(String, bool), String> {
+    if model.trim().is_empty() {
+        return Err("no hay modelo de Ollama seleccionado (Ajustes)".into());
+    }
+    let tools = json!([
+        {"type":"function","function":{
+            "name":"list_files","description":"Lista archivos y carpetas de una ruta relativa del directorio de trabajo.",
+            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"ruta relativa, '.' para la raíz"}},"required":["path"]}}},
+        {"type":"function","function":{
+            "name":"read_file","description":"Lee un archivo de texto (máx 400 líneas).",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+        {"type":"function","function":{
+            "name":"grep","description":"Busca un texto literal en archivos y devuelve archivo:línea:contenido.",
+            "parameters":{"type":"object","properties":{"query":{"type":"string"},"glob":{"type":"string","description":"opcional, ej. *.rs"}},"required":["query"]}}},
+    ]);
+    let mut messages = vec![
+        json!({"role":"system","content": nerve_system()}),
+        json!({"role":"user","content": prompt}),
+    ];
+    for _round in 0..12 {
+        let resp = chat(url, model, &messages, Some(&tools))?;
+        let calls = resp.message.tool_calls.clone();
+        if calls.is_empty() {
+            let text = resp.message.content.trim().to_string();
+            return Ok((text.clone(), true));
+        }
+        messages.push(json!({"role":"assistant","content": resp.message.content, "tool_calls": calls}));
+        for call in &calls {
+            let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let raw = call.pointer("/function/arguments").cloned().unwrap_or(json!({}));
+            let out = dispatch_read_tool(cwd, name, &raw);
+            on_event(format!("{}({}) → {}", name, brief_args(&raw), out.chars().take(120).collect::<String>()))?;
+            let tcid = call.get("id").and_then(Value::as_str).unwrap_or("");
+            messages.push(json!({"role":"tool","tool_call_id": tcid, "content": out}));
+        }
+    }
+    Err("el agente Ollama excedió el máximo de rondas de herramientas".into())
+}
+
 fn brief_args(v: &Value) -> String {
     let keys = ["path", "query", "command", "glob", "find"];
     for k in keys {

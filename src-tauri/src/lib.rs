@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod agents_md;
 mod epic;
 mod git;
 mod mock_agent;
@@ -88,6 +89,8 @@ fn set_ollama(url: String, model: String, state: State<AppState>) -> Result<Work
 fn set_security(
     max_steps: u64,
     command_allowlist: Vec<String>,
+    agents_md_enabled: bool,
+    exec_agent: Option<String>,
     state: State<AppState>,
 ) -> Result<WorkspaceConfig, String> {
     let mut cfg = state.store.load_workspace()?;
@@ -97,6 +100,9 @@ fn set_security(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    cfg.agents_md_enabled = agents_md_enabled;
+    // "" = sin perfil de ejecución
+    cfg.exec_agent = exec_agent.filter(|s| !s.trim().is_empty());
     state.store.save_workspace(&cfg)?;
     Ok(cfg)
 }
@@ -186,6 +192,18 @@ fn delete_epic(id: String, state: State<AppState>) -> Result<(), String> {
     epic::delete_epic(&state.store, &id)
 }
 
+#[tauri::command]
+fn set_epic_yolo(
+    app: AppHandle,
+    id: String,
+    yolo: bool,
+    state: State<AppState>,
+) -> Result<epic::EpicDef, String> {
+    let e = epic::set_epic_yolo(&state.store, &id, yolo)?;
+    let _ = app.emit("epic-updated", &e);
+    Ok(e)
+}
+
 // ---------- tasks ----------
 
 #[tauri::command]
@@ -206,6 +224,7 @@ fn create_task(title: String, intent: String, state: State<AppState>) -> Result<
         spec_current: None,
         spec_versions: Vec::new(),
         tickets: Vec::new(),
+        review_comments: Vec::new(),
     };
     state.store.save_task(&task)?;
     Ok(task)
@@ -314,6 +333,7 @@ fn spawn_run(
     kind: &str,
     resume_session: bool,
     skill_id: String,
+    yolo: bool,
 ) -> Result<Run, String> {
     let task = state.store.load_task(&task_id)?;
     if matches!(kind, "exec") {
@@ -325,10 +345,38 @@ fn spawn_run(
         if any_running {
             return Err("ya hay una ejecución en curso para esta task".into());
         }
+        if yolo {
+            // YOLO: auto-aprueba los tickets pendientes antes de construir
+            let mut t = task.clone();
+            let mut changed = false;
+            for tk in t.tickets.iter_mut() {
+                if !tk.approved && tk.status != "done" {
+                    tk.approved = true;
+                    changed = true;
+                }
+            }
+            if changed {
+                t.updated_at = now_ms();
+                state.store.save_task(&t)?;
+                let _ = app.emit("task-updated", &t);
+            }
+        }
     }
     let agents = state.store.load_agents()?;
     let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
     let ws = ws_path(&state)?;
+    // contexto AGENTS.md si está activado
+    let agents_md = crate::agents_md::load(&ws, &state.store);
+    // perfil por paso: para exec se usa el agente del perfil si está configurado
+    let agent = if kind == "exec" {
+        let exec_id = state.store.load_workspace()?.exec_agent;
+        match exec_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => runner::resolve_agent(&agents.agents, id)?,
+            None => agent,
+        }
+    } else {
+        agent
+    };
     let store = state.store.clone();
     let registry = state.registry.clone();
     let kind = kind.to_string();
@@ -341,9 +389,9 @@ fn spawn_run(
     let app2 = app.clone();
     std::thread::spawn(move || {
         let run = if kind == "plan" {
-            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session, &skill_c)
+            runner::run_plan(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session, &skill_c, agents_md.as_ref())
         } else {
-            runner::run_exec(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session)
+            runner::run_exec(app2.clone(), &store, &registry, &run_id_c, &task, &agent, &mode_c, &ws, resume_session, agents_md.as_ref())
         };
         let _ = app2.emit("run-finished", &run);
     });
@@ -385,6 +433,7 @@ fn start_plan_run(
         "plan",
         resume_session.unwrap_or(false),
         skill_id.unwrap_or_default(),
+        false,
     )
 }
 
@@ -395,12 +444,186 @@ fn start_exec_run(
     agent_id: String,
     mode: String,
     resume_session: Option<bool>,
+    yolo: Option<bool>,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    spawn_run(app, &state, task_id, agent_id, mode, "exec", resume_session.unwrap_or(false), String::new())
+    spawn_run(app, &state, task_id, agent_id, mode, "exec", resume_session.unwrap_or(false), String::new(), yolo.unwrap_or(false))
 }
 
-// ---------- diff / git ----------
+// ---------- verificación (review comments) ----------
+
+#[tauri::command]
+fn start_verify_run(
+    app: AppHandle,
+    task_id: String,
+    run_id: String,
+    agent_id: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    let task = state.store.load_task(&task_id)?;
+    let target = state.store.load_run(&task_id, &run_id)?;
+    if target.mode == "plan" {
+        return Err("solo se verifican runs de ejecución".into());
+    }
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    let ws = ws_path(&state)?;
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let new_run_id = new_id("run");
+    let new_run_id_c = new_run_id.clone();
+    let app2 = app.clone();
+    let agent_c = agent.clone();
+    let target_c = target.clone();
+    std::thread::spawn(move || {
+        let run = runner::verify_run(
+            app2.clone(),
+            &store,
+            &registry,
+            &new_run_id_c,
+            &task,
+            &target_c,
+            &agent_c,
+            &ws,
+        );
+        let _ = app2.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: new_run_id,
+        task_id,
+        agent: agent.id.clone(),
+        mode: "verify".into(),
+        worktree: None,
+        worktree_path: target.worktree_path.clone(),
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+/// "Fix all": un run de corrección con los comentarios abiertos como prompt.
+#[tauri::command]
+fn fix_comments(
+    app: AppHandle,
+    task_id: String,
+    mode: String,
+    agent_id: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    let task = state.store.load_task(&task_id)?;
+    let open: Vec<crate::model::ReviewComment> = task
+        .review_comments
+        .iter()
+        .filter(|c| !c.resolved)
+        .cloned()
+        .collect();
+    if open.is_empty() {
+        return Err("no hay comentarios abiertos que corregir".into());
+    }
+    let mut intent = String::from(
+        "Corrige los siguientes problemas detectados en la verificación (mantén el plan original):\n",
+    );
+    for c in &open {
+        let file = c.file.clone().unwrap_or_default();
+        let file_part = if file.is_empty() {
+            String::new()
+        } else {
+            format!("({}) ", file)
+        };
+        intent.push_str(&format!(
+            "- [{}] {}{}: {}\n",
+            c.severity,
+            file_part,
+            c.title,
+            c.detail
+        ));
+    }
+    // la corrección corre sobre la task existente (sus tickets aprobados se
+    // mantienen) y el prompt llega como intención adicional del run exec
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    let ws = ws_path(&state)?;
+    let agents_md = crate::agents_md::load(&ws, &state.store);
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let run_id = new_id("run");
+    let mode_c = mode.clone();
+    let task_c = task.clone();
+    let intent_c = intent.clone();
+    let app2 = app.clone();
+    let agent_c = agent.clone();
+    let run_id_c = run_id.clone();
+    std::thread::spawn(move || {
+        let run = runner::run_fix_run(
+            app2.clone(),
+            &store,
+            &registry,
+            &run_id_c,
+            &task_c,
+            &agent_c,
+            &mode_c,
+            &ws,
+            &intent_c,
+            agents_md.as_ref(),
+        );
+        let _ = app2.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: run_id,
+        task_id,
+        agent: agent.id.clone(),
+        mode: "fix".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+/// Marca un comentario como resuelto manualmente.
+#[tauri::command]
+fn resolve_comment(task_id: String, comment_id: String, state: State<AppState>) -> Result<Task, String> {
+    let mut t = state.store.load_task(&task_id)?;
+    let mut changed = false;
+    for c in t.review_comments.iter_mut() {
+        if c.id == comment_id {
+            c.resolved = true;
+            changed = true;
+        }
+    }
+    if changed {
+        t.updated_at = now_ms();
+        state.store.save_task(&t)?;
+    }
+    Ok(t)
+}
 
 #[tauri::command]
 fn get_diff(task_id: String, run_id: String, state: State<AppState>) -> Result<DiffResult, String> {
@@ -530,6 +753,10 @@ pub fn run() {
             continue_epic,
             cancel_epic,
             delete_epic,
+            set_epic_yolo,
+            start_verify_run,
+            fix_comments,
+            resolve_comment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

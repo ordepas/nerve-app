@@ -32,6 +32,17 @@ interface Task {
   specCurrent: string | null;
   specVersions: SpecVersion[];
   tickets: Ticket[];
+  reviewComments?: ReviewComment[];
+}
+
+interface ReviewComment {
+  id: string;
+  severity: string; // critical | major | minor | outdated
+  file: string | null;
+  title: string;
+  detail: string;
+  resolved: boolean;
+  createdAt: number;
 }
 
 interface RunEvent {
@@ -102,6 +113,7 @@ interface EpicDef {
   currentStage: number;
   status: string;
   gate: string;
+  yolo: boolean;
   lastError: string | null;
   currentRun: string | null;
   createdAt: number;
@@ -114,6 +126,8 @@ interface WorkspaceCfg {
   ollamaModel: string;
   maxSteps: number;
   commandAllowlist: string[];
+  agentsMdEnabled?: boolean;
+  execAgent?: string | null;
 }
 
 interface SkillDef {
@@ -613,6 +627,14 @@ export default function App() {
             }}
             onStart={(id) => void epicAction("start_epic", id)}
             onContinue={(id) => void epicAction("continue_epic", id)}
+            onToggleYolo={async (id, yolo) => {
+              try {
+                await invoke<EpicDef>("set_epic_yolo", { id, yolo });
+                setEpics((prev) => prev.map((x) => (x.id === id ? { ...x, yolo } : x)));
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
             onCancel={(id) => {
               openConfirm({
                 title: "Detener el epic",
@@ -753,6 +775,7 @@ function EpicsView(props: {
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
   onOpenTask: (id: string) => void;
+  onToggleYolo: (id: string, yolo: boolean) => void;
 }) {
   return (
     <div className="page">
@@ -790,6 +813,9 @@ function EpicsView(props: {
                         : `Fase ${Math.min(epic.currentStage + 1, epic.stages.length)}/${epic.stages.length}`}
                     </span>
                   )}
+                  {epic.yolo && (
+                    <span className="chip chip-planning">⚡ YOLO</span>
+                  )}
                 </div>
                 {epic.stages.length > 0 && (
                   <div className="epic-stages">
@@ -812,6 +838,14 @@ function EpicsView(props: {
                   <div className="error-bar">{epic.lastError}</div>
                 )}
                 <div className="card-actions">
+                  {epic.status !== "running" && (
+                    <button
+                      onClick={() => props.onToggleYolo(epic.id, !epic.yolo)}
+                      title="YOLO: el epic planifica, aprueba y construye sin detenerse en ningún gate"
+                    >
+                      ⚡ YOLO: {epic.yolo ? "on" : "off"}
+                    </button>
+                  )}
                   {(epic.status === "draft" || epic.status === "failed") && (
                     <button className="primary" onClick={() => props.onStart(epic.id)}>
                       {epic.status === "draft" ? "Empezar epic" : "Reintentar epic"}
@@ -981,6 +1015,7 @@ function TaskView(props: {
 }) {
   const { task } = props;
   const [resumeSession, setResumeSession] = useState(false);
+  const [yolo, setYolo] = useState(false);
   const [skills, setSkills] = useState<SkillDef[]>([]);
   const [selectedSkill, setSelectedSkill] = useState("plan");
   const [detail, setDetail] = useState<{ type: "ticket" | "run"; id: string } | null>(null);
@@ -998,6 +1033,10 @@ function TaskView(props: {
   const planned = task.tickets.length > 0 && !!task.specCurrent;
   const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
   const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
+  const comments = task.reviewComments ?? [];
+  const openComments = comments.filter((c) => !c.resolved);
+  const resolvedComments = comments.filter((c) => c.resolved);
+  const lastExecDone = [...props.runs].reverse().find((r) => r.mode !== "plan" && r.status === "done");
   // resume disponible si el agente elegido ya corrió con éxito en esta task
   const lastRunSameAgent = props.runs.find((r) => r.agent === props.selectedAgent && r.status === "done" && r.sessionId);
   const canResume = (props.selectedAgent === "qwen" || props.selectedAgent === "claude") && !!lastRunSameAgent;
@@ -1014,7 +1053,7 @@ function TaskView(props: {
 
   const runExec = async () => {
     try {
-      await invoke("start_exec_run", { taskId: task.id, agentId: props.selectedAgent, mode: props.runMode, resumeSession: wantResume });
+      await invoke("start_exec_run", { taskId: task.id, agentId: props.selectedAgent, mode: props.runMode, resumeSession: wantResume, yolo });
       props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
@@ -1057,6 +1096,34 @@ function TaskView(props: {
         }
       },
     });
+  };
+
+  const verifyRun = async () => {
+    if (!lastExecDone) return;
+    try {
+      await invoke("start_verify_run", { taskId: task.id, runId: lastExecDone.id, agentId: props.selectedAgent });
+      props.refreshRuns();
+    } catch (e) {
+      props.setError(String(e));
+    }
+  };
+
+  const fixAll = async () => {
+    try {
+      await invoke("fix_comments", { taskId: task.id, mode: props.runMode, agentId: props.selectedAgent });
+      props.refreshRuns();
+    } catch (e) {
+      props.setError(String(e));
+    }
+  };
+
+  const resolveOne = async (commentId: string) => {
+    try {
+      const t = await invoke<Task>("resolve_comment", { taskId: task.id, commentId });
+      props.updateCurrent(t);
+    } catch (e) {
+      props.setError(String(e));
+    }
   };
 
   return (
@@ -1161,6 +1228,18 @@ function TaskView(props: {
           >
             ▶ Ejecutar tickets aprobados ({approvedPending.length})
           </button>
+          <label
+            className="tech-toggle"
+            title="YOLO: lanza la ejecución aprobando automáticamente todos los tickets pendientes, sin revisarlos uno a uno"
+            style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={yolo}
+              onChange={(e) => setYolo(e.target.checked)}
+            />
+            ⚡ YOLO
+          </label>
         </div>
       )}
 
@@ -1210,8 +1289,35 @@ function TaskView(props: {
                         <button onClick={() => saveTicket({ ...tk, approved: !tk.approved })}>
                           {tk.approved ? "Desaprobar" : "Aprobar"}
                         </button>
-                        <button onClick={() => saveTicket({ ...tk, status: "done" })} disabled={tk.status === "done"}>
-                          Marcar hecho
+                        <button onClick={() => saveTicket({ ...tk, status: tk.status === "done" ? "todo" : "done" })}>
+                          {tk.status === "done" ? "Reabrir" : "Marcar hecho"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            props.openModal({
+                              title: `Editar ticket ${tk.id}`,
+                              fields: [
+                                { key: "title", label: "Título", required: true, initial: tk.title },
+                                { key: "description", label: "Descripción", multiline: true, initial: tk.description },
+                                { key: "verifyCommand", label: "Comando de verificación (opcional)", initial: tk.verifyCommand ?? "" },
+                              ],
+                              submitLabel: "Guardar",
+                              onSubmit: async (values) => {
+                                try {
+                                  await saveTicket({
+                                    ...tk,
+                                    title: values.title.trim(),
+                                    description: values.description ?? "",
+                                    verifyCommand: (values.verifyCommand ?? "").trim() || null,
+                                  });
+                                } catch (e) {
+                                  props.setError(String(e));
+                                }
+                              },
+                            });
+                          }}
+                        >
+                          Editar
                         </button>
                         <button className="danger" onClick={() => deleteTicket(tk.id)}>Eliminar</button>
                       </div>
@@ -1232,6 +1338,54 @@ function TaskView(props: {
         </section>
 
         <section className="col">
+          <h2>Revisión {comments.length > 0 && `(${openComments.length} abiertos)`}</h2>
+          {comments.length === 0 ? (
+            <div className="empty-card">
+              Sin comentarios de verificación. Tras una ejecución, pulsa “Verificar” para comparar el diff con el plan.
+            </div>
+          ) : (
+            <div className="review-panel">
+              {openComments.map((c) => (
+                <div key={c.id} className={`review-item sev-${c.severity}`}>
+                  <div className="review-head">
+                    <span className={`chip chip-sev-${c.severity}`}>{c.severity}</span>
+                    <strong>{c.title}</strong>
+                    <span className="chev-spacer" />
+                    <button
+                      onClick={() => resolveOne(c.id)}
+                      title="Marcar como resuelto"
+                    >✓</button>
+                  </div>
+                  {c.file && <div className="mono small review-file">{c.file}</div>}
+                  {c.detail && <p className="review-detail">{c.detail}</p>}
+                </div>
+              ))}
+              {openComments.length === 0 && <div className="empty-card">Todos los comentarios están resueltos ✓</div>}
+              {resolvedComments.length > 0 && (
+                <details>
+                  <summary>Resueltos ({resolvedComments.length})</summary>
+                  <ul className="review-resolved">
+                    {resolvedComments.map((c) => (
+                      <li key={c.id}>
+                        <span className={`chip chip-sev-${c.severity}`}>{c.severity}</span> {c.title}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
+          <div className="review-actions">
+            <button className="primary" onClick={verifyRun} disabled={!lastExecDone || props.runs.some((r) => r.status === "running")}>
+              🔍 Verificar
+            </button>
+            {openComments.length > 0 && (
+              <button className="primary" onClick={fixAll} disabled={props.runs.some((r) => r.status === "running")}>
+                🛠 Corregir todos ({openComments.length})
+              </button>
+            )}
+          </div>
+
           <h2>Ejecuciones</h2>
           <RunsPanel
             task={task}
@@ -1613,6 +1767,9 @@ function OllamaSection() {
 function SecuritySection() {
   const [maxSteps, setMaxSteps] = useState("");
   const [allowlist, setAllowlist] = useState("");
+  const [agentsMd, setAgentsMd] = useState(true);
+  const [execAgent, setExecAgent] = useState("");
+  const [agentOpts, setAgentOpts] = useState<AgentDef[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1621,6 +1778,13 @@ function SecuritySection() {
         const cfg = await invoke<WorkspaceCfg>("get_workspace");
         setMaxSteps(cfg.maxSteps ? String(cfg.maxSteps) : "");
         setAllowlist((cfg.commandAllowlist ?? []).join("\n"));
+        setAgentsMd(cfg.agentsMdEnabled !== false);
+        setExecAgent(cfg.execAgent ?? "");
+      } catch {
+        /* noop */
+      }
+      try {
+        setAgentOpts((await invoke<AgentsConfig>("list_agents")).agents.filter((a) => a.enabled && a.kind !== "disabled"));
       } catch {
         /* noop */
       }
@@ -1642,6 +1806,31 @@ function SecuritySection() {
           placeholder="Allowlist de comandos (uno por línea, vacío = libre)"
           style={{ width: 320 }}
         />
+      </div>
+      <div className="row" style={{ marginTop: 8, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <label className="tech-toggle" title="Inyecta el AGENTS.md más cercano (subiendo hasta la raíz) en los prompts de plan y ejecución">
+          <input
+            type="checkbox"
+            checked={agentsMd}
+            onChange={(e) => setAgentsMd(e.target.checked)}
+          />
+          Usar AGENTS.md del proyecto
+        </label>
+        <label className="tech-toggle" title="Perfil por paso: el agente que construye puede ser distinto del que planifica">
+          <span>Agente de ejecución (perfil):</span>
+          <select
+            value={execAgent}
+            onChange={(e) => setExecAgent(e.target.value)}
+            style={{ width: "auto", minWidth: 200 }}
+          >
+            <option value="">— el mismo que planifica —</option>
+            {agentOpts.map((a) => (
+              <option key={a.id} value={a.id}>{a.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
         <button
           className="primary"
           onClick={async () => {
@@ -1649,6 +1838,8 @@ function SecuritySection() {
               await invoke("set_security", {
                 maxSteps: Number(maxSteps) || 0,
                 commandAllowlist: allowlist.split("\n").map((s) => s.trim()).filter(Boolean),
+                agentsMdEnabled: agentsMd,
+                execAgent: execAgent || null,
               });
               setMsg("Guardado");
             } catch (e) {
@@ -1663,6 +1854,8 @@ function SecuritySection() {
         El presupuesto aborta el run cuando el agente supera N pasos (uso de herramientas).
         La allowlist restringe los comandos que el agente puede ejecutar: cada línea es un
         prefijo permitido (p. ej. <code>node</code>, <code>npm</code>). Vacío = sin restricción.
+        AGENTS.md da al agente el contexto del proyecto en plan y ejecución. El perfil de
+        ejecución permite planificar con un agente y construir con otro.
       </p>
       {msg && <div className="hint">{msg}</div>}
     </div>

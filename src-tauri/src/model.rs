@@ -33,6 +33,27 @@ pub struct SpecVersion {
     pub created_at: u64,
 }
 
+/// Comentario de revisión: desviación detectada al comparar la implementación
+/// con el plan (estilo Traycer: critical/major/minor/outdated).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewComment {
+    // el id del agente se descarta: Nerve asigna new_id("rc") al normalizar
+    #[serde(default)]
+    pub id: String,
+    pub severity: String, // critical | major | minor | outdated
+    #[serde(default)]
+    pub file: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub resolved: bool,
+    // created_at lo asigna Nerve al normalizar; los agentes no lo devuelven
+    #[serde(default)]
+    pub created_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -48,6 +69,9 @@ pub struct Task {
     pub spec_versions: Vec<SpecVersion>,
     #[serde(default)]
     pub tickets: Vec<Ticket>,
+    // comentarios de verificación (diff vs plan), persistidos en la task
+    #[serde(default)]
+    pub review_comments: Vec<ReviewComment>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -204,6 +228,17 @@ pub struct WorkspaceConfig {
     // si tiene entradas, solo se permiten los prefijos listados
     #[serde(default)]
     pub command_allowlist: Vec<String>,
+    // inyectar el AGENTS.md más cercano (subiendo hasta la raíz) en plan y exec
+    #[serde(default = "default_true")]
+    pub agents_md_enabled: bool,
+    // perfil por paso: agente para planificar y agente para ejecutar;
+    // None = usar el mismo agente elegido en la toolbar
+    #[serde(default)]
+    pub exec_agent: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_ollama_url() -> String {

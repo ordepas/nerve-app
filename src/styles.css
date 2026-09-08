@@ -273,6 +273,34 @@ button.block { width: 100%; margin-top: 8px; }
 .ticket.done { border-left-color: var(--ok); }
 .ticket.blocked { border-left-color: var(--danger); }
 
+/* ---------- review comments ---------- */
+.review-panel { display: flex; flex-direction: column; gap: 8px; }
+.review-item {
+  background: var(--panel); border: 1px solid var(--border-soft); border-left: 2px solid var(--border);
+  border-radius: var(--radius); padding: 9px 12px;
+}
+.review-item.sev-critical { border-left-color: var(--danger); }
+.review-item.sev-major { border-left-color: var(--warn); }
+.review-item.sev-minor { border-left-color: var(--blue); }
+.review-item.sev-outdated { border-left-color: var(--muted); }
+.review-head { display: flex; align-items: center; gap: 8px; }
+.review-head strong { font-size: 12.5px; }
+.chev-spacer { flex: 1; }
+.review-head button {
+  padding: 1px 8px; font-size: 12px; color: var(--ok); background: transparent;
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
+}
+.review-head button:hover { background: var(--ok-soft); border-color: var(--ok); }
+.review-file { color: var(--muted); margin-top: 3px; }
+.review-detail { margin: 5px 0 0; color: var(--text-dim); font-size: 12.5px; }
+.review-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.review-resolved { margin: 4px 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.review-resolved li { margin: 3px 0; display: flex; align-items: center; gap: 6px; }
+.chip-sev-critical { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
+.chip-sev-major { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.chip-sev-minor { color: var(--blue); background: var(--blue-soft); border-color: transparent; }
+.chip-sev-outdated { color: var(--muted); }
+
 /* ---------- runs ---------- */
 .runs { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .run-row {
