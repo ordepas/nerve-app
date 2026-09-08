@@ -90,6 +90,8 @@ interface WorkspaceCfg {
   projectPath: string | null;
   ollamaUrl: string;
   ollamaModel: string;
+  maxSteps: number;
+  commandAllowlist: string[];
 }
 
 type ModalSpec = {
@@ -1313,6 +1315,65 @@ function OllamaSection() {
 
 // ---------- settings ----------
 
+function SecuritySection() {
+  const [maxSteps, setMaxSteps] = useState("");
+  const [allowlist, setAllowlist] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await invoke<WorkspaceCfg>("get_workspace");
+        setMaxSteps(cfg.maxSteps ? String(cfg.maxSteps) : "");
+        setAllowlist((cfg.commandAllowlist ?? []).join("\n"));
+      } catch {
+        /* noop */
+      }
+    })();
+  }, []);
+
+  return (
+    <div>
+      <div className="row">
+        <input
+          value={maxSteps}
+          onChange={(e) => setMaxSteps(e.target.value.replace(/[^0-9]/g, ""))}
+          placeholder="Pasos máximos por run (vacío = sin límite)"
+          style={{ width: 320 }}
+        />
+        <input
+          value={allowlist}
+          onChange={(e) => setAllowlist(e.target.value)}
+          placeholder="Allowlist de comandos (uno por línea, vacío = libre)"
+          style={{ width: 320 }}
+        />
+        <button
+          className="primary"
+          onClick={async () => {
+            try {
+              await invoke("set_security", {
+                maxSteps: Number(maxSteps) || 0,
+                commandAllowlist: allowlist.split("\n").map((s) => s.trim()).filter(Boolean),
+              });
+              setMsg("Guardado");
+            } catch (e) {
+              setMsg(String(e));
+            }
+          }}
+        >
+          Guardar
+        </button>
+      </div>
+      <p className="hint">
+        El presupuesto aborta el run cuando el agente supera N pasos (uso de herramientas).
+        La allowlist restringe los comandos que el agente puede ejecutar: cada línea es un
+        prefijo permitido (p. ej. <code>node</code>, <code>npm</code>). Vacío = sin restricción.
+      </p>
+      {msg && <div className="hint">{msg}</div>}
+    </div>
+  );
+}
+
 function Settings(props: {
   projectPath: string | null;
   setProjectPath: (p: string | null) => void;
@@ -1361,6 +1422,9 @@ function Settings(props: {
         Para ejecutar tickets necesitan soporte de <i>tools</i>.
       </p>
       <OllamaSection />
+
+      <h2>Seguridad</h2>
+      <SecuritySection />
 
       <h2>Agentes</h2>
       <p className="hint">

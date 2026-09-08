@@ -196,6 +196,14 @@ pub struct WorkspaceConfig {
     pub ollama_url: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
+    // presupuesto máximo de "pasos de agente" por run (tool calls + turns);
+    // 0 = sin límite. El run se aborta al agotarlo.
+    #[serde(default)]
+    pub max_steps: u64,
+    // si está vacío, la ejecución de comandos por parte del agente es libre;
+    // si tiene entradas, solo se permiten los prefijos listados
+    #[serde(default)]
+    pub command_allowlist: Vec<String>,
 }
 
 fn default_ollama_url() -> String {

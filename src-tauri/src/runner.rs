@@ -333,12 +333,50 @@ fn read_stream_codex(child: &mut KillChild, cancel: &CancelState, last_msg_path:
     Ok((text, session_id))
 }
 
+/// Presupuesto de pasos del run: cuenta tool calls vistos en el stream y
+/// aborta (como cancelación) al agotar el límite (0 = sin límite).
+#[derive(Clone)]
+pub struct StepBudget {
+    max: u64,
+    count: Arc<Mutex<u64>>,
+    exceeded: Arc<AtomicBool>,
+}
+
+impl StepBudget {
+    pub fn new(max: u64) -> Self {
+        Self { max, count: Arc::new(Mutex::new(0)), exceeded: Arc::new(AtomicBool::new(false)) }
+    }
+    pub fn tick(&self) -> Result<(), String> {
+        if self.max == 0 {
+            return Ok(());
+        }
+        let mut c = self.count.lock().unwrap();
+        *c += 1;
+        if *c > self.max {
+            self.exceeded.store(true, Ordering::Relaxed);
+            return Err(format!(
+                "presupuesto agotado: el run superó {} pasos del agente",
+                self.max
+            ));
+        }
+        Ok(())
+    }
+    pub fn used(&self) -> u64 {
+        *self.count.lock().unwrap()
+    }
+    pub fn exceeded(&self) -> bool {
+        self.exceeded.load(Ordering::Relaxed)
+    }
+}
+
 /// Lee stream-json del hijo hasta el evento result; devuelve (texto_final, session_id).
 /// Cada evento intermedio legible (texto parcial, uso de herramientas) se pasa
 /// a `on_event` en vivo para que la UI lo muestre mientras el agente trabaja.
 fn read_stream(
     child: &mut KillChild,
     cancel: &CancelState,
+    budget: &StepBudget,
+    allowlist: &[String],
     mut on_event: impl FnMut(String),
 ) -> Result<(String, Option<String>), String> {
     let stdout = child
@@ -354,6 +392,9 @@ fn read_stream(
         if cancel.cancelled() {
             return Err("__cancelled__".into());
         }
+        if budget.exceeded() {
+            return Err("__cancelled__".into());
+        }
         line.clear();
         let n = reader.read_line(&mut line).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -367,7 +408,21 @@ fn read_stream(
             continue;
         };
         if let Some(desc) = describe_stream_event(&v) {
-            on_event(desc);
+            on_event(desc.clone());
+            // allowlist: comandos del agente fuera de la lista abortan el run
+            if command_tool_violation(&v, allowlist) == Some(false) {
+                let _ = child.0.kill();
+                return Err("comando bloqueado: no está en la allowlist del workspace".into());
+            }
+            // cada tool call consume presupuesto
+            if desc.contains('→') {
+                if let Err(e) = budget.tick() {
+                    eprintln!("nerve: {}", e);
+                    // abortar el run: el loop detecta exceeded() y corta
+                    let _ = child.0.kill();
+                    return Err(e);
+                }
+            }
         }
         match v.get("type").and_then(Value::as_str) {
             Some("system") => {
@@ -457,6 +512,68 @@ fn tool_input_brief(input: Option<&Value>) -> String {
     String::new()
 }
 
+/// ¿El comando está permitido por la allowlist? (prefijos; lista vacía = libre)
+/// Ignora prefijos triviales de entorno (cd, set) que los CLIs anteponen.
+pub fn command_allowed(command: &str, allowlist: &[String]) -> bool {
+    if allowlist.is_empty() {
+        return true;
+    }
+    let cmd = command.trim_start();
+    let first = cmd
+        .split_whitespace()
+        .find(|w| !w.eq_ignore_ascii_case("cd") || cmd[..cmd.len() - w.len()].contains("&&"))
+        .unwrap_or("");
+    // toma el primer token real (saltando "cd X &&")
+    let mut tokens = cmd.split_whitespace();
+    let mut candidate = tokens.next().unwrap_or("");
+    let lower = candidate.to_ascii_lowercase();
+    if lower == "cd" {
+        // salta hasta después del "&&" si existe
+        if let Some(pos) = cmd.to_ascii_lowercase().find("&&") {
+            candidate = cmd[pos + 2..].trim_start().split_whitespace().next().unwrap_or("");
+        }
+    }
+    let candidate = candidate.trim_matches(|c| c == '"' || c == '\'');
+    let _ = first;
+    allowlist
+        .iter()
+        .any(|a| {
+            let a = a.trim().trim_matches(|c| c == '"' || c == '\'');
+            !a.is_empty()
+                && (candidate.eq_ignore_ascii_case(a)
+                    || candidate
+                        .to_ascii_lowercase()
+                        .starts_with(&a.to_ascii_lowercase()))
+        })
+}
+
+/// Verifica el comando de un tool_use "run_command"/"bash" contra la allowlist.
+/// Devuelve None si la herramienta no es de comandos, Some(false) si viola.
+fn command_tool_violation(v: &Value, allowlist: &[String]) -> Option<bool> {
+    if allowlist.is_empty() {
+        return None;
+    }
+    let obj = v.pointer("/message/content").and_then(Value::as_array)?;
+    for item in obj {
+        if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+        let is_cmd_tool = ["bash", "shell", "run_command", "execute_command", "cmd", "terminal"]
+            .iter()
+            .any(|t| name.to_ascii_lowercase().contains(t));
+        if !is_cmd_tool {
+            continue;
+        }
+        if let Some(cmd) = item.pointer("/input/command").and_then(Value::as_str) {
+            if !command_allowed(cmd, allowlist) {
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
 pub struct RunPaths {
     pub base_sha: Option<String>,
     pub worktree_path: Option<PathBuf>,
@@ -540,6 +657,10 @@ pub fn run_plan(
 
     let result: Result<(), String> = (|| {
         emit(&app, store, &task.id, run_id, "info", Some("Generando spec y plan…".into()), None);
+        // presupuesto de pasos + allowlist de comandos (config del workspace)
+        let wcfg = store.load_workspace()?;
+        let budget = StepBudget::new(wcfg.max_steps);
+        let allowlist = wcfg.command_allowlist.clone();
         if let Some(sid) = &resume_id {
             emit(&app, store, &task.id, run_id, "info", Some(format!("↩ continuando sesión previa del agente ({})", sid)), None);
         }
@@ -590,7 +711,7 @@ pub fn run_plan(
                 let store3 = store.clone();
                 let tid3 = task.id.clone();
                 let rid3 = run_id.to_string();
-                read_stream(&mut child, &cancel, move |desc| {
+                read_stream(&mut child, &cancel, &budget, &allowlist, move |desc| {
                     emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
                 })
             });
@@ -685,6 +806,10 @@ pub fn run_exec(
 
     let result: Result<(), String> = (|| {
         emit(&app, store, &task.id, run_id, "info", Some("Preparando entorno…".into()), None);
+        // presupuesto de pasos + allowlist de comandos (config del workspace)
+        let wcfg = store.load_workspace()?;
+        let budget = StepBudget::new(wcfg.max_steps);
+        let allowlist = wcfg.command_allowlist.clone();
         let paths = if mode == "workspace" {
             if !git::is_repo(ws) {
                 return Err("el workspace no es un repositorio git; usa modo worktree".into());
@@ -816,7 +941,7 @@ pub fn run_exec(
                     let tid3 = task.id.clone();
                     let rid3 = run_id.to_string();
                     let tid4 = t.id.clone();
-                    read_stream(&mut child, &cancel, move |desc| {
+                    read_stream(&mut child, &cancel, &budget, &allowlist, move |desc| {
                         emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), Some(tid4.clone()));
                     })
                 });

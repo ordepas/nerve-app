@@ -82,6 +82,23 @@ fn set_ollama(url: String, model: String, state: State<AppState>) -> Result<Work
     Ok(cfg)
 }
 
+#[tauri::command]
+fn set_security(
+    max_steps: u64,
+    command_allowlist: Vec<String>,
+    state: State<AppState>,
+) -> Result<WorkspaceConfig, String> {
+    let mut cfg = state.store.load_workspace()?;
+    cfg.max_steps = max_steps;
+    cfg.command_allowlist = command_allowlist
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    state.store.save_workspace(&cfg)?;
+    Ok(cfg)
+}
+
 // ---------- tasks ----------
 
 #[tauri::command]
@@ -375,6 +392,7 @@ pub fn run() {
             get_workspace,
             list_ollama_models,
             set_ollama,
+            set_security,
             list_tasks,
             create_task,
             get_task,
