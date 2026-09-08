@@ -54,6 +54,17 @@ pub struct ReviewComment {
     pub created_at: u64,
 }
 
+/// Artefacto de planificación previa a la spec (estilo Traycer): brief,
+/// arquitectura o flujos. Se genera en fases separadas y con aprobación
+/// del usuario entre cada una.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifact {
+    pub kind: String, // brief | architecture | flows
+    pub content: String,
+    pub created_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -67,6 +78,9 @@ pub struct Task {
     pub spec_current: Option<String>,
     #[serde(default)]
     pub spec_versions: Vec<SpecVersion>,
+    // documentos de planificación (brief/arquitectura/flujos), opcionales
+    #[serde(default)]
+    pub plan_artifacts: Vec<PlanArtifact>,
     #[serde(default)]
     pub tickets: Vec<Ticket>,
     // comentarios de verificación (diff vs plan), persistidos en la task

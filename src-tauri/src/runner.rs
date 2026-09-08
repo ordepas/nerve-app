@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::git;
 use crate::mock_agent;
-use crate::model::{AgentDef, Run, RunEvent, Task, Ticket};
+use crate::model::{AgentDef, PlanArtifact, Run, RunEvent, Task, Ticket};
 use crate::ollama;
 use crate::store::{new_id, now_ms, Store};
 
@@ -74,6 +74,177 @@ pub fn plan_prompt_for_skill(intent: &str, template: Option<String>) -> String {
 }
 
 pub type ExecTicket = (String, String, String, Vec<String>, Option<String>);
+
+// ---------- artefactos de planificación (brief / arquitectura / flujos) ----------
+
+/// Prompt para generar un artefacto de planificación. `context` incluye los
+/// artefactos ya aprobados, para que cada fase parta de los anteriores.
+pub fn doc_prompt(kind: &str, task: &Task, context: &str) -> String {
+    let (instr, titulo) = match kind {
+        "brief" => (
+            "Escribe el BRIEF del proyecto: objetivo de negocio, público objetivo, alcance funcional (qué entra y qué no), requerimientos clave y restricciones. Markdown conciso con secciones.",
+            "brief.md",
+        ),
+        "architecture" => (
+            "Escribe el documento de ARQUITECTURA: estructura técnica de la solución (páginas/componentes, tecnologías, organización de archivos, datos consumidos, responsive/accesibilidad). Markdown conciso con secciones.",
+            "architecture.md",
+        ),
+        _ => (
+            "Escribe el documento de FLUJOS: describe cada flujo de usuario principal paso a paso (navegación, acciones del usuario y resultado esperado), incluyendo estados vacíos y de error relevantes. Markdown conciso con secciones.",
+            "flows.md",
+        ),
+    };
+    let ctx = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nDocumentos ya aprobados (respétalos y sé coherente con ellos):\n{context}")
+    };
+    format!(
+        "Eres el planificador de Nerve. Genera el documento de planificación «{titulo}» para esta tarea, inspeccionando el repositorio si es útil (solo lectura; no modifiques ningún archivo).\n\n{instr}{ctx}\n\nResponde SOLO con el contenido del documento en Markdown (sin bloque JSON, sin explicaciones adicionales).\n\nIntención del usuario:\n{intent}\n\nTítulo de la tarea: {title}",
+        titulo = titulo,
+        instr = instr,
+        ctx = ctx,
+        intent = task.intent,
+        title = task.title,
+    )
+}
+
+/// Run de documento de planificación (modo "doc"): solo lectura sobre el
+/// workspace, genera UN artefacto (brief | architecture | flows) y lo guarda
+/// en la task. No genera spec ni tickets.
+pub fn run_doc(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    ws: &Path,
+    kind: &str,
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: "doc".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        // contexto: artefactos ya aprobados, en orden fijo
+        let order = ["brief", "architecture", "flows"];
+        let mut context = String::new();
+        for k in order {
+            if k == kind {
+                break;
+            }
+            if let Some(a) = task.plan_artifacts.iter().find(|a| a.kind == k) {
+                context.push_str(&format!("\n--- {} ---\n{}\n", k, a.content));
+            }
+        }
+        let prompt = doc_prompt(kind, task, &context);
+        emit(&app, store, &task.id, run_id, "info", Some(format!("Generando {}…", kind)), None);
+
+        let text: String = if agent.kind == "mock" {
+            mock_agent::doc_output(kind, task, &context)
+        } else if agent.kind == "ollama" {
+            let cfg = store.load_workspace()?;
+            let (t, _) = ollama::run_read_prompt(&cfg.ollama_url, &cfg.ollama_model, &prompt, ws, |line| {
+                if cancel.cancelled() {
+                    return Err("__cancelled__".into());
+                }
+                emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                Ok(())
+            })?;
+            t
+        } else if agent.kind == "codex" {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+            let mut args: Vec<String> = agent.plan_args.clone();
+            args.push("--output-last-message".into());
+            args.push(last_msg.to_string_lossy().to_string());
+            let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                read_stream_codex(&mut child, &cancel, &last_msg)
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let _ = fs::remove_file(&last_msg);
+            let (t, _) = res?;
+            t
+        } else {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let args: Vec<String> = agent.plan_args.clone();
+            let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                let app3 = app.clone();
+                let store3 = store.clone();
+                let tid3 = task.id.clone();
+                let rid3 = run_id.to_string();
+                let budget = StepBudget::new(0);
+                read_stream(&mut child, &cancel, &budget, &[], move |desc| {
+                    emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                })
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let (t, _) = res?;
+            t
+        };
+        run.session_id = None;
+        let content = text.trim().to_string();
+        if content.is_empty() {
+            return Err("el agente devolvió un documento vacío".into());
+        }
+
+        // guardar el artefacto en la task (reemplaza si ya existe)
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.plan_artifacts.retain(|a| a.kind != kind);
+        fresh.plan_artifacts.push(PlanArtifact {
+            kind: kind.to_string(),
+            created_at: now_ms(),
+            content: content.clone(),
+        });
+        fresh.plan_artifacts.sort_by_key(|a| {
+            order.iter().position(|k| *k == a.kind).unwrap_or(99)
+        });
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
+
+        run.summary = Some(format!("{} generado ({} líneas)", kind, content.lines().count()));
+        emit(
+            &app,
+            store,
+            &task.id,
+            run_id,
+            "doc",
+            Some(format!("Documento generado: {} ({} líneas)", kind, content.lines().count())),
+            None,
+        );
+        let _ = app.emit("plan-doc", json!({"taskId": task.id, "runId": run_id, "kind": kind}));
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
 
 pub fn exec_prompt(task_title: &str, tickets: &[ExecTicket], extra: Option<&str>) -> String {
     let mut list = String::new();

@@ -126,6 +126,7 @@ fn new_task(store: &Store, title: &str, intent: &str) -> Result<Task, String> {
         updated_at: now,
         spec_current: None,
         spec_versions: Vec::new(),
+        plan_artifacts: Vec::new(),
         tickets: Vec::new(),
         review_comments: Vec::new(),
     };

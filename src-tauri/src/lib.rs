@@ -223,6 +223,7 @@ fn create_task(title: String, intent: String, state: State<AppState>) -> Result<
         updated_at: now,
         spec_current: None,
         spec_versions: Vec::new(),
+        plan_artifacts: Vec::new(),
         tickets: Vec::new(),
         review_comments: Vec::new(),
     };
@@ -295,6 +296,74 @@ fn set_spec(task_id: String, content: String, state: State<AppState>) -> Result<
     task.updated_at = now_ms();
     state.store.save_task(&task)?;
     Ok(task)
+}
+
+// ---------- artefactos de planificación (brief/arquitectura/flujos) ----------
+
+#[tauri::command]
+fn generate_doc(
+    app: AppHandle,
+    task_id: String,
+    agent_id: String,
+    kind: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    if !matches!(kind.as_str(), "brief" | "architecture" | "flows") {
+        return Err(format!("kind de documento no soportado: {}", kind));
+    }
+    let task = state.store.load_task(&task_id)?;
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    let ws = ws_path(&state)?;
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let run_id = new_id("run");
+    let run_id_c = run_id.clone();
+    let kind_c = kind.clone();
+    let agent_label = agent.id.clone();
+    std::thread::spawn(move || {
+        let run = runner::run_doc(app.clone(), &store, &registry, &run_id_c, &task, &agent, &ws, &kind_c);
+        let _ = app.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: run_id,
+        task_id,
+        agent: agent_label,
+        mode: "doc".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+#[tauri::command]
+fn delete_doc(
+    app: AppHandle,
+    task_id: String,
+    kind: String,
+    state: State<AppState>,
+) -> Result<Task, String> {
+    let mut t = state.store.load_task(&task_id)?;
+    t.plan_artifacts.retain(|a| a.kind != kind);
+    t.updated_at = now_ms();
+    state.store.save_task(&t)?;
+    let _ = app.emit("task-updated", &t);
+    Ok(t)
 }
 
 // ---------- runs ----------
@@ -743,6 +812,8 @@ pub fn run() {
             delete_ticket,
             set_tickets,
             set_spec,
+            generate_doc,
+            delete_doc,
             list_runs,
             get_run,
             cancel_run,

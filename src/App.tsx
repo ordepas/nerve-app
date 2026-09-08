@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ReactNode } from "react";
 import "./styles.css";
 
 // ---------- tipos (espejo de model.rs) ----------
@@ -22,6 +23,12 @@ interface SpecVersion {
   createdAt: number;
 }
 
+interface PlanArtifact {
+  kind: string; // brief | architecture | flows
+  content: string;
+  createdAt: number;
+}
+
 interface Task {
   id: string;
   title: string;
@@ -31,6 +38,7 @@ interface Task {
   updatedAt: number;
   specCurrent: string | null;
   specVersions: SpecVersion[];
+  planArtifacts?: PlanArtifact[];
   tickets: Ticket[];
   reviewComments?: ReviewComment[];
 }
@@ -225,6 +233,7 @@ function agentLabel(id: string) {
 function runKindLabel(mode: string, techMode: boolean) {
   if (techMode) return mode;
   if (mode === "plan") return "solo planifica";
+  if (mode === "doc") return "documento (solo lee)";
   if (mode === "workspace") return "directo en tu proyecto";
   return "en copia aislada";
 }
@@ -397,6 +406,188 @@ interface FieldDef {
   multiline?: boolean;
   initial?: string;
   required?: boolean;
+}
+
+// tarjeta de documento de planificación (brief / arquitectura / flujos)
+function DocArtifact(props: {
+  icon: ReactNode;
+  title: string;
+  content: string;
+  createdAt: number;
+  busy?: boolean;
+  onDelete?: () => void;
+  children?: ReactNode;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(true);
+  const download = () => {
+    const blob = new Blob([props.content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = props.title;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(props.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* noop */
+    }
+  };
+  return (
+    <div className="artifact">
+      <div className="artifact-head">
+        <span className="artifact-icon" aria-hidden="true">{props.icon}</span>
+        <div className="artifact-title">
+          <strong>{props.title}</strong>
+          <span className="artifact-sub">
+            {props.content.split("\n").length} líneas · {fmtTime(props.createdAt)}
+          </span>
+        </div>
+        <div className="artifact-actions">
+          {props.onDelete && (
+            <button className="ghost" onClick={props.onDelete} title="Eliminar este documento">🗑</button>
+          )}
+          <button className="ghost" onClick={() => setOpen(!open)}>{open ? "Contraer" : "Ver"}</button>
+          <button className="ghost" onClick={copy}>{copied ? "✓ Copiado" : "Copiar"}</button>
+          <button className="ghost" onClick={download}>Descargar</button>
+        </div>
+      </div>
+      {open && (
+        <div
+          className="artifact-body md"
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(props.content) }}
+        />
+      )}
+      {props.children}
+    </div>
+  );
+}
+
+// sección de artefactos de planificación: brief → arquitectura → flujos,
+// con confirmación antes de generar cada uno (estilo Traycer)
+function PlanArtifactsSection(props: {
+  task: Task;
+  selectedAgent: string;
+  busy: boolean;
+  openConfirm: (spec: ConfirmSpec) => void;
+  setError: (e: string) => void;
+  updateCurrent: (t: Task) => void;
+}) {
+  const { task } = props;
+  const artifacts = task.planArtifacts ?? [];
+  const running = props.busy;
+  const byKind = (k: string) => artifacts.find((a) => a.kind === k);
+  const brief = byKind("brief");
+  const arch = byKind("architecture");
+  const flows = byKind("flows");
+
+  const askGenerate = (kind: string) => {
+    const labels: Record<string, string> = {
+      brief: "el brief",
+      architecture: "el documento de arquitectura",
+      flows: "el documento de flujos",
+    };
+    props.openConfirm({
+      title: "¿Generar este documento?",
+      message: `El agente va a leer tu proyecto (solo lectura) para escribir ${labels[kind]}. No modifica ningún archivo.`,
+      confirmLabel: "Generar",
+      onConfirm: async () => {
+        try {
+          await invoke("generate_doc", { taskId: task.id, agentId: props.selectedAgent, kind });
+          // el estado de la task llega por task-updated al terminar el run
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
+  };
+
+  const confirmDelete = (kind: string, label: string) => {
+    props.openConfirm({
+      title: "Eliminar documento",
+      message: `Se eliminará ${label}. Puedes generarlo de nuevo cuando quieras.`,
+      confirmLabel: "Eliminar",
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const t = await invoke<Task>("delete_doc", { taskId: task.id, kind });
+          props.updateCurrent(t);
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
+  };
+
+  const nextLabel = !brief
+    ? "1 · Brief"
+    : !arch
+      ? "2 · Arquitectura"
+      : !flows
+        ? "3 · Flujos"
+        : null;
+  const nextKind = !brief ? "brief" : !arch ? "architecture" : "flows";
+
+  const stepChip = (kind: string, label: string, a?: PlanArtifact) => {
+    if (a) {
+      return (
+        <span className="chip chip-approved" key={kind}>✓ {label}</span>
+      );
+    }
+    return (
+      <button key={kind} className="ghost" disabled={running} onClick={() => askGenerate(kind)}>
+        {running ? "Esperando…" : `Generar ${label}`}
+      </button>
+    );
+  };
+
+  return (
+    <div className="plan-docs">
+      <div className="plan-docs-progress">
+        {stepChip("brief", "Brief", brief)}
+        {stepChip("architecture", "Arquitectura", arch)}
+        {stepChip("flows", "Flujos", flows)}
+        {running && <span className="small dim">Generando documento…</span>}
+      </div>
+      {nextLabel && !running && (
+        <button className="primary block" onClick={() => askGenerate(nextKind)}>
+          Generar {nextLabel}
+        </button>
+      )}
+      {brief && (
+        <DocArtifact
+          icon="🎯"
+          title="brief.md"
+          content={brief.content}
+          createdAt={brief.createdAt}
+          onDelete={() => confirmDelete("brief", "el brief")}
+        />
+      )}
+      {arch && (
+        <DocArtifact
+          icon="🏗"
+          title="architecture.md"
+          content={arch.content}
+          createdAt={arch.createdAt}
+          onDelete={() => confirmDelete("architecture", "el documento de arquitectura")}
+        />
+      )}
+      {flows && (
+        <DocArtifact
+          icon="🔀"
+          title="flows.md"
+          content={flows.content}
+          createdAt={flows.createdAt}
+          onDelete={() => confirmDelete("flows", "el documento de flujos")}
+        />
+      )}
+    </div>
+  );
 }
 
 function FormModal(props: {
@@ -1354,6 +1545,15 @@ function TaskView(props: {
         if (s === 2) document.querySelector<HTMLElement>(".spec-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
         if (s >= 3) document.querySelector<HTMLElement>(".approval-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }} />
+
+      <PlanArtifactsSection
+        task={task}
+        selectedAgent={props.selectedAgent}
+        busy={props.runs.some((r) => r.status === "running")}
+        openConfirm={props.openConfirm}
+        setError={props.setError}
+        updateCurrent={props.updateCurrent}
+      />
 
       {stage < 5 && !props.techMode && (
         <div className="approval-anchor" />
