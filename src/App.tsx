@@ -80,6 +80,17 @@ interface AgentsConfig {
   agents: AgentDef[];
 }
 
+interface OllamaModelInfo {
+  name: string;
+  supportsTools: boolean;
+}
+
+interface WorkspaceCfg {
+  projectPath: string | null;
+  ollamaUrl: string;
+  ollamaModel: string;
+}
+
 type ModalSpec = {
   title: string;
   fields: FieldDef[];
@@ -798,6 +809,82 @@ function RunsPanel(props: {
   );
 }
 
+// ---------- ollama ----------
+
+function OllamaSection() {
+  const [url, setUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<OllamaModelInfo[] | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await invoke<WorkspaceCfg>("get_workspace");
+        setUrl(cfg.ollamaUrl || "http://localhost:11434");
+        setModel(cfg.ollamaModel || "");
+      } catch {
+        /* noop */
+      }
+    })();
+  }, []);
+
+  const connect = async () => {
+    setStatus("Conectando…");
+    try {
+      await invoke("set_ollama", { url, model });
+      const list = await invoke<OllamaModelInfo[]>("list_ollama_models");
+      setModels(list);
+      setStatus(`Conectado — ${list.length} modelo(s) disponibles`);
+    } catch (e) {
+      setModels(null);
+      setStatus(String(e));
+    }
+  };
+
+  return (
+    <div>
+      <div className="row">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="http://localhost:11434"
+        />
+        <button className="primary" onClick={connect}>Conectar</button>
+      </div>
+      {models && models.length > 0 && (
+        <div className="row">
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="">— elige un modelo —</option>
+            {models.map((m) => (
+              <option key={m.name} value={m.name}>
+                {m.name}{m.supportsTools ? " ✔ tools" : " (sin tools)"}
+              </option>
+            ))}
+          </select>
+          <button
+            className="primary"
+            onClick={async () => {
+              try {
+                await invoke("set_ollama", { url, model });
+                setStatus(`Guardado: ${model}`);
+              } catch (e) {
+                setStatus(String(e));
+              }
+            }}
+          >
+            Guardar modelo
+          </button>
+        </div>
+      )}
+      {models && models.length === 0 && (
+        <div className="empty">No hay modelos instalados (usa `ollama pull &lt;modelo&gt;`).</div>
+      )}
+      {status && <div className="hint">{status}</div>}
+    </div>
+  );
+}
+
 // ---------- settings ----------
 
 function Settings(props: {
@@ -838,6 +925,13 @@ function Settings(props: {
           Guardar
         </button>
       </div>
+
+      <h2>Ollama (modelos locales)</h2>
+      <p className="hint">
+        Conéctate a tu servidor Ollama para usar sus modelos como agentes.
+        Para ejecutar tickets necesitan soporte de <i>tools</i>.
+      </p>
+      <OllamaSection />
 
       <h2>Agentes</h2>
       <p className="hint">

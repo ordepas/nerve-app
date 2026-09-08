@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 use crate::git;
 use crate::mock_agent;
 use crate::model::{AgentDef, Run, RunEvent, Task};
+use crate::ollama;
 use crate::store::{new_id, now_ms, Store};
 
 /// Mata el proceso hijo al soltarlo (cancelación o fin del run).
@@ -315,6 +316,18 @@ pub fn run_plan(
         emit(&app, store, &task.id, run_id, "info", Some("Generando spec y plan…".into()), None);
         let (spec, tickets_json) = if agent.kind == "mock" {
             mock_agent::plan_output(&task.intent)
+        } else if agent.kind == "ollama" {
+            let cfg = store.load_workspace()?;
+            let (text, _) = ollama::run_plan(&cfg.ollama_url, &cfg.ollama_model, &task.intent, ws, |line| {
+                if cancel.cancelled() {
+                    return Err("__cancelled__".into());
+                }
+                emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                Ok(())
+            })?;
+            let tickets =
+                extract_json_block(&text).ok_or("el agente no devolvió el bloque JSON de tickets")?;
+            (text.clone(), tickets.to_string())
         } else {
             let prompt_file = write_prompt_file(&plan_prompt(&task.intent))?;
             let args: Vec<String> = agent.plan_args.clone();
@@ -433,6 +446,37 @@ pub fn run_exec(
                 let dir = cwd.join("nerve-run");
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 mock_agent::exec_apply(&dir, &t.title)?
+            } else if agent.kind == "ollama" {
+                let cfg = store.load_workspace()?;
+                let prompt = exec_prompt(
+                    &task.title,
+                    &[(
+                        t.id.clone(),
+                        t.title.clone(),
+                        t.description.clone(),
+                        t.acceptance.clone(),
+                        t.verify_command.clone(),
+                    )],
+                );
+                let (text, complete) = ollama::run_exec(&cfg.ollama_url, &cfg.ollama_model, &prompt, &cwd, |line| {
+                    if cancel.cancelled() {
+                        return Err("__cancelled__".into());
+                    }
+                    emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), Some(t.id.clone()));
+                    Ok(())
+                })?;
+                if !complete {
+                    emit(
+                        &app,
+                        store,
+                        &task.id,
+                        run_id,
+                        "warn",
+                        Some("el agente no imprimió NERVE_RUN_COMPLETE; se hace checkpoint igualmente".into()),
+                        Some(t.id.clone()),
+                    );
+                }
+                text
             } else {
                 let prompt_file = write_prompt_file(&exec_prompt(
                     &task.title,

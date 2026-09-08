@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::model::{AgentsConfig, Run, RunEvent, Task, WorkspaceConfig};
+use crate::model::{AgentDef, AgentsConfig, Run, RunEvent, Task, WorkspaceConfig};
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -52,7 +52,21 @@ impl Store {
     pub fn load_agents(&self) -> Result<AgentsConfig, String> {
         let p = self.root.join("config").join("agents.json");
         if p.exists() {
-            self.read_json(&p)
+            let mut cfg: AgentsConfig = self.read_json(&p)?;
+            // migración: añade el agente Ollama a configs creadas antes de su integración
+            if !cfg.agents.iter().any(|a| a.id == "ollama") {
+                cfg.agents.push(AgentDef {
+                    id: "ollama".into(),
+                    label: "Ollama (local)".into(),
+                    bin: String::new(),
+                    kind: "ollama".into(),
+                    enabled: true,
+                    plan_args: vec![],
+                    exec_args: vec![],
+                });
+                self.write_json(&p, &cfg)?;
+            }
+            Ok(cfg)
         } else {
             // "{}" activa el #[serde(default)] con la lista real de agentes;
             // AgentsConfig::default() del derive produciría un Vec vacío.

@@ -160,8 +160,13 @@ pub fn stage_all(cwd: &Path) -> Result<(), String> {
 }
 
 /// Commit con identidad local nerve (no depende de la config global del usuario).
+/// Si no hay nada que commitear (ticket ya implementado), es un no-op y devuelve HEAD.
 pub fn commit_all(cwd: &Path, msg: &str) -> Result<String, String> {
     stage_all(cwd)?;
+    let staged = git(cwd, &s(&["diff", "--cached", "--name-only"]))?;
+    if staged.trim().is_empty() {
+        return head_sha(cwd);
+    }
     git(
         cwd,
         &s(&["-c", "user.name=nerve", "-c", "user.email=nerve@local", "commit", "-m", msg]),

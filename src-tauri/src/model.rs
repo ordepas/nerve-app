@@ -170,6 +170,25 @@ fn default_agents() -> Vec<AgentDef> {
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub project_path: Option<String>,
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".into()
+}
+
+fn default_ollama_model() -> String {
+    String::new()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaModelInfo {
+    pub name: String,
+    pub supports_tools: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

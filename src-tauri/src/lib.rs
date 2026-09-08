@@ -6,11 +6,12 @@ use tauri::{AppHandle, Emitter, State};
 mod git;
 mod mock_agent;
 mod model;
+mod ollama;
 mod runner;
 mod store;
 
 use model::{
-    AgentsConfig, DiffResult, Run, SpecVersion, Task, Ticket, WorkspaceConfig,
+    AgentsConfig, DiffResult, OllamaModelInfo, Run, SpecVersion, Task, Ticket, WorkspaceConfig,
 };
 use runner::RunRegistry;
 use store::{new_id, now_ms, Store};
@@ -53,9 +54,8 @@ fn set_workspace(path: String, state: State<AppState>) -> Result<WorkspaceConfig
     if !p.is_dir() {
         return Err("la carpeta no existe".into());
     }
-    let cfg = WorkspaceConfig {
-        project_path: Some(p.to_string_lossy().to_string()),
-    };
+    let mut cfg = state.store.load_workspace()?;
+    cfg.project_path = Some(p.to_string_lossy().to_string());
     state.store.save_workspace(&cfg)?;
     Ok(cfg)
 }
@@ -63,6 +63,23 @@ fn set_workspace(path: String, state: State<AppState>) -> Result<WorkspaceConfig
 #[tauri::command]
 fn get_workspace(state: State<AppState>) -> Result<WorkspaceConfig, String> {
     state.store.load_workspace()
+}
+
+// ---------- ollama ----------
+
+#[tauri::command]
+fn list_ollama_models(state: State<AppState>) -> Result<Vec<OllamaModelInfo>, String> {
+    let cfg = state.store.load_workspace()?;
+    ollama::list_models(&cfg.ollama_url)
+}
+
+#[tauri::command]
+fn set_ollama(url: String, model: String, state: State<AppState>) -> Result<WorkspaceConfig, String> {
+    let mut cfg = state.store.load_workspace()?;
+    cfg.ollama_url = url;
+    cfg.ollama_model = model;
+    state.store.save_workspace(&cfg)?;
+    Ok(cfg)
 }
 
 // ---------- tasks ----------
@@ -341,6 +358,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_workspace,
             get_workspace,
+            list_ollama_models,
+            set_ollama,
             list_tasks,
             create_task,
             get_task,
