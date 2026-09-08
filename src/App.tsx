@@ -258,10 +258,14 @@ function FormModal(props: {
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(props.fields.map((f) => [f.key, f.initial ?? ""])),
   );
+  const [missing, setMissing] = useState<Set<string>>(new Set());
 
   const submit = () => {
-    const missing = props.fields.find((f) => f.required && !values[f.key]?.trim());
-    if (missing) return;
+    const empty = props.fields.filter((f) => f.required && !values[f.key]?.trim());
+    if (empty.length > 0) {
+      setMissing(new Set(empty.map((f) => f.key)));
+      return;
+    }
     props.onSubmit(values);
   };
 
@@ -275,8 +279,18 @@ function FormModal(props: {
             {f.multiline ? (
               <textarea
                 autoFocus={props.fields[0]?.key === f.key}
+                className={missing.has(f.key) ? "field-error" : undefined}
                 value={values[f.key] ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                onChange={(e) => {
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }));
+                  if (missing.has(f.key) && e.target.value.trim()) {
+                    setMissing((prev) => {
+                      const next = new Set(prev);
+                      next.delete(f.key);
+                      return next;
+                    });
+                  }
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
                 }}
@@ -284,8 +298,18 @@ function FormModal(props: {
             ) : (
               <input
                 autoFocus={props.fields[0]?.key === f.key}
+                className={missing.has(f.key) ? "field-error" : undefined}
                 value={values[f.key] ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                onChange={(e) => {
+                  setValues((v) => ({ ...v, [f.key]: e.target.value }));
+                  if (missing.has(f.key) && e.target.value.trim()) {
+                    setMissing((prev) => {
+                      const next = new Set(prev);
+                      next.delete(f.key);
+                      return next;
+                    });
+                  }
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submit();
                   if (e.key === "Escape") props.onClose();
@@ -300,6 +324,9 @@ function FormModal(props: {
             {props.submitLabel ?? "Guardar"}
           </button>
         </div>
+        {missing.size > 0 && (
+          <p className="modal-warn">Rellena los campos marcados con * para continuar.</p>
+        )}
       </div>
     </div>
   );

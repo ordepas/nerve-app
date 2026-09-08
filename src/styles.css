@@ -273,6 +273,9 @@ button.block { width: 100%; margin-top: 8px; }
 .ticket.done { border-left-color: var(--ok); }
 .ticket.blocked { border-left-color: var(--danger); }
 
+.field-error { border-color: var(--danger) !important; }
+.modal-warn { color: var(--danger); font-size: 12.5px; margin: 8px 0 0; }
+
 /* ---------- review comments ---------- */
 .review-panel { display: flex; flex-direction: column; gap: 8px; }
 .review-item {
