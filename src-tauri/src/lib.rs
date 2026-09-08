@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod git;
 mod mock_agent;
@@ -357,6 +357,18 @@ pub fn run() {
         .manage(AppState {
             store: Store::default(),
             registry: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        })
+        .setup(move |app| {
+            // runs que quedaron "running" de una sesión anterior → failed
+            let state: State<AppState> = app.state();
+            match state.store.fail_stale_running_runs() {
+                Ok(ids) if !ids.is_empty() => {
+                    eprintln!("nerve: {} run(s) huérfano(s) marcados como failed", ids.len());
+                }
+                Err(e) => eprintln!("nerve: no se pudieron limpiar runs huérfanos: {}", e),
+                _ => {}
+            }
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             set_workspace,

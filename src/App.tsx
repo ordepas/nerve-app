@@ -1089,6 +1089,25 @@ function RunsPanel(props: {
                   Detener
                 </button>
               )}
+              {(r.status === "failed" || r.status === "cancelled") && (
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await invoke(r.mode === "plan" ? "start_plan_run" : "start_exec_run", {
+                        taskId: r.taskId,
+                        agentId: r.agent,
+                        mode: r.mode === "plan" ? "worktree" : r.mode,
+                      });
+                      await props.refreshRuns();
+                    } catch (err) {
+                      props.setError(String(err));
+                    }
+                  }}
+                >
+                  Reintentar
+                </button>
+              )}
               {r.status === "done" && r.mode !== "plan" && (
                 <button onClick={(e) => { e.stopPropagation(); viewDiff(r); }}>Ver cambios</button>
               )}

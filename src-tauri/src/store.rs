@@ -266,6 +266,51 @@ impl Store {
         Ok(())
     }
 
+    /// Marca los runs "running" como failed (la app se cerró con runs activos)
+    /// y devuelve las tasks afectadas al estado ready.
+    pub fn fail_stale_running_runs(&self) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut task_ids: Vec<String> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT task_id FROM runs WHERE status = 'running'")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_err)?;
+            for row in rows {
+                task_ids.push(row.map_err(sql_err)?);
+            }
+        }
+        for tid in &task_ids {
+            let mut stmt = conn
+                .prepare("SELECT data FROM runs WHERE task_id = ?1 AND status = 'running'")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([tid], |row| row.get::<_, String>(0))
+                .map_err(sql_err)?;
+            for row in rows {
+                let data: String = row.map_err(sql_err)?;
+                if let Ok(mut run) = serde_json::from_str::<Run>(&data) {
+                    run.status = "failed".into();
+                    run.finished_at = Some(now_ms());
+                    run.summary = Some("interrumpido: la app se cerró mientras corría".into());
+                    if let Ok(data) = serde_json::to_string(&run) {
+                        let _ = conn.execute(
+                            "UPDATE runs SET status='failed', finished_at=?2, data=?3 WHERE id=?1",
+                            rusqlite::params![run.id, run.finished_at.map(|f| f as i64), data],
+                        );
+                    }
+                }
+            }
+            let _ = conn.execute(
+                "UPDATE tasks SET status='ready', data=json_set(data, '$.status', 'ready'), updated_at=?2 WHERE id=?1 AND status='in_dev'",
+                rusqlite::params![tid, now_ms() as i64],
+            );
+        }
+        Ok(task_ids)
+    }
+
     // ---------- json helpers / migración ----------
 
     fn write_json<T: Serialize>(&self, path: &PathBuf, value: &T) -> Result<(), String> {
