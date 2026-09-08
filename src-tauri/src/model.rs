@@ -65,6 +65,35 @@ pub struct PlanArtifact {
     pub created_at: u64,
 }
 
+/// Pregunta que el agente formula antes de generar un documento.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub suggestion: Option<String>,
+    #[serde(default)]
+    pub answer: Option<String>,
+}
+
+/// Preguntas pendientes de responder para un documento aún no generado.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDoc {
+    pub kind: String, // brief | architecture | flows | spec
+    pub questions: Vec<Question>,
+    pub created_at: u64,
+}
+
+/// Respuesta del usuario a una pregunta (entrada del comando answer_doc).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerInput {
+    pub id: String,
+    pub text: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -81,6 +110,9 @@ pub struct Task {
     // documentos de planificación (brief/arquitectura/flujos), opcionales
     #[serde(default)]
     pub plan_artifacts: Vec<PlanArtifact>,
+    // preguntas pendientes por documento (fase "pregúntame antes de construir")
+    #[serde(default)]
+    pub pending_docs: Vec<PendingDoc>,
     #[serde(default)]
     pub tickets: Vec<Ticket>,
     // comentarios de verificación (diff vs plan), persistidos en la task

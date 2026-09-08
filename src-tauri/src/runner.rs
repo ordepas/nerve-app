@@ -75,12 +75,13 @@ pub fn plan_prompt_for_skill(intent: &str, template: Option<String>) -> String {
 
 pub type ExecTicket = (String, String, String, Vec<String>, Option<String>);
 
-// ---------- artefactos de planificación (brief / arquitectura / flujos) ----------
+// ---------- artefactos de planificación (brief / arquitectura / flujos / spec) ----------
 
-/// Prompt para generar un artefacto de planificación. `context` incluye los
-/// artefactos ya aprobados, para que cada fase parta de los anteriores.
-pub fn doc_prompt(kind: &str, task: &Task, context: &str) -> String {
-    let (instr, titulo) = match kind {
+/// Orden fijo de los documentos del plan; cada fase parte de los anteriores.
+pub const DOC_ORDER: [&str; 4] = ["brief", "architecture", "flows", "spec"];
+
+fn doc_instruction(kind: &str) -> (&'static str, &'static str) {
+    match kind {
         "brief" => (
             "Escribe el BRIEF del proyecto: objetivo de negocio, público objetivo, alcance funcional (qué entra y qué no), requerimientos clave y restricciones. Markdown conciso con secciones.",
             "brief.md",
@@ -89,24 +90,77 @@ pub fn doc_prompt(kind: &str, task: &Task, context: &str) -> String {
             "Escribe el documento de ARQUITECTURA: estructura técnica de la solución (páginas/componentes, tecnologías, organización de archivos, datos consumidos, responsive/accesibilidad). Markdown conciso con secciones.",
             "architecture.md",
         ),
-        _ => (
+        "flows" => (
             "Escribe el documento de FLUJOS: describe cada flujo de usuario principal paso a paso (navegación, acciones del usuario y resultado esperado), incluyendo estados vacíos y de error relevantes. Markdown conciso con secciones.",
             "flows.md",
         ),
+        _ => (
+            "Escribe la ESPECIFICACIÓN ejecutable: propósito, alcance, decisiones de diseño y criterios de aceptación globales. Markdown conciso con secciones.",
+            "spec.md",
+        ),
+    }
+}
+
+/// Prompt para generar un artefacto de planificación. `context` incluye los
+/// artefactos ya aprobados; `qa` son las preguntas/respuestas del usuario.
+pub fn doc_prompt(kind: &str, task: &Task, context: &str, qa: Option<&str>) -> String {
+    let (instr, titulo) = doc_instruction(kind);
+    let ctx = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nDocumentos ya aprobados (respétalos y sé coherente con ellos):\n{context}")
     };
+    let qa_block = match qa {
+        Some(q) if !q.trim().is_empty() => {
+            format!("\n\nPreguntas que hiciste al usuario y sus respuestas (incorpóralas al documento; si alguna quedó sin respuesta, decide tú con criterio razonable):\n{q}")
+        }
+        _ => String::new(),
+    };
+    format!(
+        "Eres el planificador de Nerve. Genera el documento de planificación «{titulo}» para esta tarea, inspeccionando el repositorio si es útil (solo lectura; no modifiques ningún archivo).\n\n{instr}{ctx}{qa_block}\n\nResponde SOLO con el contenido del documento en Markdown (sin bloque JSON, sin explicaciones adicionales).\n\nIntención del usuario:\n{intent}\n\nTítulo de la tarea: {title}",
+        titulo = titulo,
+        instr = instr,
+        ctx = ctx,
+        qa_block = qa_block,
+        intent = task.intent,
+        title = task.title,
+    )
+}
+
+/// Prompt de la fase de preguntas: el agente pregunta antes de generar.
+pub fn ask_prompt(kind: &str, task: &Task, context: &str) -> String {
+    let (instr, titulo) = doc_instruction(kind);
     let ctx = if context.trim().is_empty() {
         String::new()
     } else {
         format!("\n\nDocumentos ya aprobados (respétalos y sé coherente con ellos):\n{context}")
     };
     format!(
-        "Eres el planificador de Nerve. Genera el documento de planificación «{titulo}» para esta tarea, inspeccionando el repositorio si es útil (solo lectura; no modifiques ningún archivo).\n\n{instr}{ctx}\n\nResponde SOLO con el contenido del documento en Markdown (sin bloque JSON, sin explicaciones adicionales).\n\nIntención del usuario:\n{intent}\n\nTítulo de la tarea: {title}",
+        "Eres el planificador de Nerve. Antes de escribir el documento de planificación «{titulo}» para esta tarea, necesitas aclarar detalles con el usuario.\n\n{instr}{ctx}\n\nFormula entre 2 y 4 preguntas concretas cuya respuesta cambie de forma relevante lo que diría el documento. No preguntes por cosas que ya responden los documentos aprobados o la intención. No modifiques ningún archivo.\n\nTu respuesta final debe terminar EXACTAMENTE con este bloque JSON en una línea:\n```json\n{{\"questions\":[{{\"id\":\"q1\",\"text\":\"...\",\"suggestion\":\"opcional, tu respuesta sugerida o null\"}}]}}\n```\n\nIntención del usuario:\n{intent}\n\nTítulo de la tarea: {title}",
         titulo = titulo,
         instr = instr,
         ctx = ctx,
         intent = task.intent,
         title = task.title,
     )
+}
+
+/// Extrae el bloque JSON de preguntas (fenced o línea con "questions").
+pub fn extract_questions_block(text: &str) -> Option<Value> {
+    let candidate = if let Some(start) = text.find("```json") {
+        let rest = &text[start + 7..];
+        let end = rest.find("```").unwrap_or(rest.len());
+        rest[..end].trim().to_string()
+    } else {
+        text.lines()
+            .rev()
+            .find(|l| {
+                let s = l.trim_start();
+                s.starts_with('{') && s.contains("\"questions\"")
+            })
+            .map(|l| l.trim().to_string())?
+    };
+    serde_json::from_str(&candidate).ok()
 }
 
 /// Run de documento de planificación (modo "doc"): solo lectura sobre el
@@ -143,9 +197,8 @@ pub fn run_doc(
 
     let result: Result<(), String> = (|| {
         // contexto: artefactos ya aprobados, en orden fijo
-        let order = ["brief", "architecture", "flows"];
         let mut context = String::new();
-        for k in order {
+        for k in DOC_ORDER {
             if k == kind {
                 break;
             }
@@ -153,7 +206,21 @@ pub fn run_doc(
                 context.push_str(&format!("\n--- {} ---\n{}\n", k, a.content));
             }
         }
-        let prompt = doc_prompt(kind, task, &context);
+        // preguntas/respuestas pendientes para este documento (se consumen al generar)
+        let qa = task.pending_docs.iter().find(|p| p.kind == kind).map(|p| {
+            p.questions
+                .iter()
+                .map(|q| {
+                    format!(
+                        "- P: {}\n  R: {}",
+                        q.text,
+                        q.answer.as_deref().unwrap_or("(sin respuesta; decide tú)")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let prompt = doc_prompt(kind, task, &context, qa.as_deref());
         emit(&app, store, &task.id, run_id, "info", Some(format!("Generando {}…", kind)), None);
 
         let text: String = if agent.kind == "mock" {
@@ -217,8 +284,28 @@ pub fn run_doc(
             content: content.clone(),
         });
         fresh.plan_artifacts.sort_by_key(|a| {
-            order.iter().position(|k| *k == a.kind).unwrap_or(99)
+            DOC_ORDER.iter().position(|k| *k == a.kind).unwrap_or(99)
         });
+        // las preguntas de este documento ya fueron consumidas por el prompt
+        fresh.pending_docs.retain(|p| p.kind != kind);
+        if kind == "spec" {
+            // la spec pasa a ser el artefacto ejecutable: versiona y alimenta
+            // el flujo existente (tickets/verificación)
+            let version = fresh
+                .spec_versions
+                .iter()
+                .map(|v| v.version)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            fresh.spec_versions.push(crate::model::SpecVersion {
+                version,
+                content: content.clone(),
+                created_at: now_ms(),
+            });
+            fresh.spec_current = Some(content.clone());
+            fresh.status = "planning".into();
+        }
         fresh.updated_at = now_ms();
         store.save_task(&fresh)?;
         let _ = app.emit("task-updated", &fresh);
@@ -234,6 +321,155 @@ pub fn run_doc(
             None,
         );
         let _ = app.emit("plan-doc", json!({"taskId": task.id, "runId": run_id, "kind": kind}));
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
+
+/// Run de preguntas (modo "ask"): el agente formula 2-4 preguntas sobre el
+/// documento indicado y Nerve las guarda en task.pending_docs. Solo lectura.
+pub fn run_questions(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    ws: &Path,
+    kind: &str,
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: "ask".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        let mut context = String::new();
+        for k in DOC_ORDER {
+            if k == kind {
+                break;
+            }
+            if let Some(a) = task.plan_artifacts.iter().find(|a| a.kind == k) {
+                context.push_str(&format!("\n--- {} ---\n{}\n", k, a.content));
+            }
+        }
+        let prompt = ask_prompt(kind, task, &context);
+        emit(&app, store, &task.id, run_id, "info", Some(format!("Preparando preguntas para {}…", kind)), None);
+
+        let text: String = if agent.kind == "mock" {
+            mock_agent::questions_output(kind)
+        } else if agent.kind == "ollama" {
+            let cfg = store.load_workspace()?;
+            let (t, _) = ollama::run_read_prompt(&cfg.ollama_url, &cfg.ollama_model, &prompt, ws, |line| {
+                if cancel.cancelled() {
+                    return Err("__cancelled__".into());
+                }
+                emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                Ok(())
+            })?;
+            t
+        } else if agent.kind == "codex" {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+            let mut args: Vec<String> = agent.plan_args.clone();
+            args.push("--output-last-message".into());
+            args.push(last_msg.to_string_lossy().to_string());
+            let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                read_stream_codex(&mut child, &cancel, &last_msg)
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let _ = fs::remove_file(&last_msg);
+            let (t, _) = res?;
+            t
+        } else {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let args: Vec<String> = agent.plan_args.clone();
+            let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                let app3 = app.clone();
+                let store3 = store.clone();
+                let tid3 = task.id.clone();
+                let rid3 = run_id.to_string();
+                let budget = StepBudget::new(0);
+                read_stream(&mut child, &cancel, &budget, &[], move |desc| {
+                    emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                })
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let (t, _) = res?;
+            t
+        };
+        run.session_id = None;
+
+        let v = extract_questions_block(&text)
+            .ok_or("el agente no devolvió el bloque JSON de preguntas")?;
+        let list = v
+            .get("questions")
+            .cloned()
+            .ok_or("el bloque JSON no tiene \"questions\"")?;
+        let parsed: Vec<crate::model::Question> =
+            serde_json::from_value(list).map_err(|e| format!("preguntas inválidas: {}", e))?;
+        if parsed.is_empty() {
+            return Err("el agente no formuló preguntas".into());
+        }
+        // ids normalizados por Nerve (los agentes pueden omitirlos)
+        let questions: Vec<crate::model::Question> = parsed
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut q)| {
+                q.id = format!("q{}", i + 1);
+                q.answer = None;
+                q
+            })
+            .collect();
+        let n = questions.len();
+
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.pending_docs.retain(|p| p.kind != kind);
+        fresh.pending_docs.push(crate::model::PendingDoc {
+            kind: kind.to_string(),
+            questions,
+            created_at: now_ms(),
+        });
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
+
+        run.summary = Some(format!("{} preguntas para {}", n, kind));
+        emit(
+            &app,
+            store,
+            &task.id,
+            run_id,
+            "ask",
+            Some(format!("El agente tiene {} preguntas antes de escribir {}", n, kind)),
+            None,
+        );
+        let _ = app.emit("doc-questions", json!({"taskId": task.id, "runId": run_id, "kind": kind}));
         Ok(())
     })();
 

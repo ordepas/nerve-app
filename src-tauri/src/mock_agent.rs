@@ -47,6 +47,40 @@ pub fn doc_output(kind: &str, task: &crate::model::Task, context: &str) -> Strin
     }
 }
 
+/// Preguntas simuladas para un documento (mismo contrato que el adaptador real).
+pub fn questions_output(kind: &str) -> String {
+    let qs: Vec<(&str, Option<&str>)> = match kind {
+        "brief" => vec![
+            ("¿Quién es el público principal y qué acción clave debe hacer en el sitio?", Some("visitantes móviles; comprar un celular desde la landing")),
+            ("¿Qué restricciones de marca o contenido debo respetar?", None),
+        ],
+        "architecture" => vec![
+            ("¿Prefieres un único archivo autocontenido o estructura multi-página?", Some("un único archivo autocontenido")),
+            ("¿Hay datos externos que consumir o todo es estático?", Some("todo estático")),
+        ],
+        "flows" => vec![
+            ("¿Qué flujo es el más crítico y debe funcionar sin fallos?", Some("hero → catálogo → compra")),
+            ("¿Qué comportamiento esperas en móvil para el menú de navegación?", None),
+        ],
+        _ => vec![
+            ("¿Qué criterios de aceptación son imprescindibles para dar la tarea por terminada?", Some("el sitio abre sin errores y se ve bien en móvil y escritorio")),
+            ("¿Hay algo explícitamente fuera de alcance?", None),
+        ],
+    };
+    let list: Vec<serde_json::Value> = qs
+        .iter()
+        .enumerate()
+        .map(|(i, (text, sug))| {
+            json!({
+                "id": format!("q{}", i + 1),
+                "text": text,
+                "suggestion": sug,
+            })
+        })
+        .collect();
+    json!({ "questions": list }).to_string()
+}
+
 /// Ejecución simulada: escribe nerve-demo.md en el run dir y devuelve el resumen.
 pub fn exec_apply(run_dir: &Path, ticket_title: &str) -> Result<String, String> {
     let path = run_dir.join("nerve-demo.md");

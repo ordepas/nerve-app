@@ -14,7 +14,8 @@ mod skills;
 mod store;
 
 use model::{
-    AgentsConfig, DiffResult, OllamaModelInfo, Run, SpecVersion, Task, Ticket, WorkspaceConfig,
+    AgentsConfig, AnswerInput, DiffResult, OllamaModelInfo, Run, SpecVersion, Task, Ticket,
+    WorkspaceConfig,
 };
 use runner::RunRegistry;
 use store::{new_id, now_ms, Store};
@@ -224,6 +225,7 @@ fn create_task(title: String, intent: String, state: State<AppState>) -> Result<
         spec_current: None,
         spec_versions: Vec::new(),
         plan_artifacts: Vec::new(),
+        pending_docs: Vec::new(),
         tickets: Vec::new(),
         review_comments: Vec::new(),
     };
@@ -308,7 +310,7 @@ fn generate_doc(
     kind: String,
     state: State<AppState>,
 ) -> Result<Run, String> {
-    if !matches!(kind.as_str(), "brief" | "architecture" | "flows") {
+    if !matches!(kind.as_str(), "brief" | "architecture" | "flows" | "spec") {
         return Err(format!("kind de documento no soportado: {}", kind));
     }
     let task = state.store.load_task(&task_id)?;
@@ -360,6 +362,86 @@ fn delete_doc(
 ) -> Result<Task, String> {
     let mut t = state.store.load_task(&task_id)?;
     t.plan_artifacts.retain(|a| a.kind != kind);
+    t.pending_docs.retain(|p| p.kind != kind);
+    t.updated_at = now_ms();
+    state.store.save_task(&t)?;
+    let _ = app.emit("task-updated", &t);
+    Ok(t)
+}
+
+/// Fase de preguntas: el agente formula 2-4 preguntas para el documento
+/// indicado y el usuario responde antes de generarlo.
+#[tauri::command]
+fn ask_doc(
+    app: AppHandle,
+    task_id: String,
+    agent_id: String,
+    kind: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    if !matches!(kind.as_str(), "brief" | "architecture" | "flows" | "spec") {
+        return Err(format!("kind de documento no soportado: {}", kind));
+    }
+    let task = state.store.load_task(&task_id)?;
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    let ws = ws_path(&state)?;
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let run_id = new_id("run");
+    let run_id_c = run_id.clone();
+    let kind_c = kind.clone();
+    let agent_label = agent.id.clone();
+    std::thread::spawn(move || {
+        let run = runner::run_questions(app.clone(), &store, &registry, &run_id_c, &task, &agent, &ws, &kind_c);
+        let _ = app.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: run_id,
+        task_id,
+        agent: agent_label,
+        mode: "ask".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+/// Guarda las respuestas del usuario a las preguntas de un documento.
+#[tauri::command]
+fn answer_doc(
+    app: AppHandle,
+    task_id: String,
+    kind: String,
+    answers: Vec<AnswerInput>,
+    state: State<AppState>,
+) -> Result<Task, String> {
+    let mut t = state.store.load_task(&task_id)?;
+    match t.pending_docs.iter_mut().find(|p| p.kind == kind) {
+        None => return Err(format!("no hay preguntas pendientes para {}", kind)),
+        Some(p) => {
+            for a in answers {
+                if let Some(q) = p.questions.iter_mut().find(|q| q.id == a.id) {
+                    q.answer = Some(a.text.trim().to_string());
+                }
+            }
+        }
+    }
     t.updated_at = now_ms();
     state.store.save_task(&t)?;
     let _ = app.emit("task-updated", &t);
@@ -814,6 +896,8 @@ pub fn run() {
             set_spec,
             generate_doc,
             delete_doc,
+            ask_doc,
+            answer_doc,
             list_runs,
             get_run,
             cancel_run,

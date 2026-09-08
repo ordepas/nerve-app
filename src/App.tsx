@@ -24,8 +24,21 @@ interface SpecVersion {
 }
 
 interface PlanArtifact {
-  kind: string; // brief | architecture | flows
+  kind: string; // brief | architecture | flows | spec
   content: string;
+  createdAt: number;
+}
+
+interface Question {
+  id: string;
+  text: string;
+  suggestion: string | null;
+  answer: string | null;
+}
+
+interface PendingDoc {
+  kind: string; // brief | architecture | flows | spec
+  questions: Question[];
   createdAt: number;
 }
 
@@ -39,6 +52,7 @@ interface Task {
   specCurrent: string | null;
   specVersions: SpecVersion[];
   planArtifacts?: PlanArtifact[];
+  pendingDocs?: PendingDoc[];
   tickets: Ticket[];
   reviewComments?: ReviewComment[];
 }
@@ -234,6 +248,7 @@ function runKindLabel(mode: string, techMode: boolean) {
   if (techMode) return mode;
   if (mode === "plan") return "solo planifica";
   if (mode === "doc") return "documento (solo lee)";
+  if (mode === "ask") return "preguntas (solo lee)";
   if (mode === "workspace") return "directo en tu proyecto";
   return "en copia aislada";
 }
@@ -331,73 +346,6 @@ function renderMarkdown(src: string): string {
   return out.join("\n");
 }
 
-function SpecArtifact(props: { task: Task }) {
-  const { task } = props;
-  const [copied, setCopied] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  if (!task.specCurrent) {
-    return <div className="empty-card">Aún no hay spec. Usa “Generar spec y plan”.</div>;
-  }
-  const versions = task.specVersions;
-  const download = () => {
-    const blob = new Blob([task.specCurrent!], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "spec.md";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(task.specCurrent!);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      /* noop */
-    }
-  };
-  return (
-    <div className="artifact">
-      <div className="artifact-head">
-        <span className="artifact-icon" aria-hidden="true">📄</span>
-        <div className="artifact-title">
-          <strong>spec.md</strong>
-          <span className="artifact-sub">
-            {versions.length > 0 ? `v${versions[versions.length - 1].version}` : "v1"} ·{" "}
-            {task.specCurrent!.split("\n").length} líneas · {fmtTime(task.updatedAt)}
-          </span>
-        </div>
-        <div className="artifact-actions">
-          {versions.length > 1 && (
-            <button className="ghost" onClick={() => setShowHistory(!showHistory)}>
-              {showHistory ? "Ocultar historial" : `Historial (${versions.length})`}
-            </button>
-          )}
-          <button className="ghost" onClick={copy}>{copied ? "✓ Copiado" : "Copiar"}</button>
-          <button className="ghost" onClick={download}>Descargar</button>
-        </div>
-      </div>
-      {showHistory && versions.length > 1 && (
-        <ul className="artifact-history">
-          {versions.map((v) => (
-            <li key={v.version}>
-              <span className="mono">v{v.version}</span> — {fmtTime(v.createdAt)}
-              {v.version === versions[versions.length - 1].version && (
-                <span className="chip chip-approved">actual</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      <div
-        className="artifact-body md"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(task.specCurrent!) }}
-      />
-    </div>
-  );
-}
-
 // ---------- modal ----------
 
 interface FieldDef {
@@ -468,8 +416,9 @@ function DocArtifact(props: {
   );
 }
 
-// sección de artefactos de planificación: brief → arquitectura → flujos,
-// con confirmación antes de generar cada uno (estilo Traycer)
+// sección de artefactos del plan: brief → arquitectura → flujos → spec,
+// con fase de preguntas del agente antes de cada documento y confirmación
+// para generarlo (estilo Traycer)
 function PlanArtifactsSection(props: {
   task: Task;
   selectedAgent: string;
@@ -480,26 +429,28 @@ function PlanArtifactsSection(props: {
 }) {
   const { task } = props;
   const artifacts = task.planArtifacts ?? [];
+  const pendings = task.pendingDocs ?? [];
   const running = props.busy;
   const byKind = (k: string) => artifacts.find((a) => a.kind === k);
-  const brief = byKind("brief");
-  const arch = byKind("architecture");
-  const flows = byKind("flows");
+  const pendingByKind = (k: string) => pendings.find((p) => p.kind === k);
+
+  const DOC_META: Record<string, { label: string; file: string; icon: string; the: string }> = {
+    brief: { label: "Brief", file: "brief.md", icon: "🎯", the: "el brief" },
+    architecture: { label: "Arquitectura", file: "architecture.md", icon: "🏗", the: "el documento de arquitectura" },
+    flows: { label: "Flujos", file: "flows.md", icon: "🔀", the: "el documento de flujos" },
+    spec: { label: "Spec", file: "spec.md", icon: "📄", the: "la especificación" },
+  };
+  const order = ["brief", "architecture", "flows", "spec"];
 
   const askGenerate = (kind: string) => {
-    const labels: Record<string, string> = {
-      brief: "el brief",
-      architecture: "el documento de arquitectura",
-      flows: "el documento de flujos",
-    };
+    const meta = DOC_META[kind];
     props.openConfirm({
       title: "¿Generar este documento?",
-      message: `El agente va a leer tu proyecto (solo lectura) para escribir ${labels[kind]}. No modifica ningún archivo.`,
+      message: `El agente va a leer tu proyecto (solo lectura) para escribir ${meta.the}. No modifica ningún archivo.`,
       confirmLabel: "Generar",
       onConfirm: async () => {
         try {
           await invoke("generate_doc", { taskId: task.id, agentId: props.selectedAgent, kind });
-          // el estado de la task llega por task-updated al terminar el run
         } catch (e) {
           props.setError(String(e));
         }
@@ -507,10 +458,27 @@ function PlanArtifactsSection(props: {
     });
   };
 
-  const confirmDelete = (kind: string, label: string) => {
+  const askQuestions = (kind: string) => {
+    const meta = DOC_META[kind];
+    props.openConfirm({
+      title: `¿Preguntar antes de generar ${meta.label}?`,
+      message: `El agente leerá tu proyecto (solo lectura) y te formulará sus preguntas para escribir ${meta.the}. Tú las respondes y luego se genera.`,
+      confirmLabel: "Preguntar",
+      onConfirm: async () => {
+        try {
+          await invoke("ask_doc", { taskId: task.id, agentId: props.selectedAgent, kind });
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
+  };
+
+  const confirmDelete = (kind: string) => {
+    const meta = DOC_META[kind];
     props.openConfirm({
       title: "Eliminar documento",
-      message: `Se eliminará ${label}. Puedes generarlo de nuevo cuando quieras.`,
+      message: `Se eliminará ${meta.the} y sus preguntas pendientes. Puedes generarlo de nuevo cuando quieras.`,
       confirmLabel: "Eliminar",
       danger: true,
       onConfirm: async () => {
@@ -524,68 +492,141 @@ function PlanArtifactsSection(props: {
     });
   };
 
-  const nextLabel = !brief
-    ? "1 · Brief"
-    : !arch
-      ? "2 · Arquitectura"
-      : !flows
-        ? "3 · Flujos"
-        : null;
-  const nextKind = !brief ? "brief" : !arch ? "architecture" : "flows";
-
-  const stepChip = (kind: string, label: string, a?: PlanArtifact) => {
-    if (a) {
-      return (
-        <span className="chip chip-approved" key={kind}>✓ {label}</span>
-      );
-    }
-    return (
-      <button key={kind} className="ghost" disabled={running} onClick={() => askGenerate(kind)}>
-        {running ? "Esperando…" : `Generar ${label}`}
-      </button>
-    );
-  };
+  const nextKind = order.find((k) => !byKind(k));
 
   return (
     <div className="plan-docs">
-      <div className="plan-docs-progress">
-        {stepChip("brief", "Brief", brief)}
-        {stepChip("architecture", "Arquitectura", arch)}
-        {stepChip("flows", "Flujos", flows)}
-        {running && <span className="small dim">Generando documento…</span>}
+      {order.map((k) => {
+        const meta = DOC_META[k];
+        const a = byKind(k);
+        const p = pendingByKind(k);
+        const isNext = k === nextKind;
+        if (a) {
+          return (
+            <DocArtifact
+              key={k}
+              icon={meta.icon}
+              title={meta.file}
+              content={a.content}
+              createdAt={a.createdAt}
+              onDelete={() => confirmDelete(k)}
+            />
+          );
+        }
+        if (p) {
+          return (
+            <QuestionsCard
+              key={k}
+              pending={p}
+              meta={meta}
+              running={running}
+              openConfirm={props.openConfirm}
+              setError={props.setError}
+              updateCurrent={props.updateCurrent}
+              taskId={task.id}
+              selectedAgent={props.selectedAgent}
+            />
+          );
+        }
+        return (
+          <div key={k} className="doc-step">
+            <div className="doc-step-info">
+              <span className="artifact-icon" aria-hidden="true">{meta.icon}</span>
+              <div>
+                <strong>{meta.file}</strong>
+                <span className="artifact-sub">{meta.label} — aún no generado</span>
+              </div>
+            </div>
+            <div className="doc-step-actions">
+              {isNext && (
+                <button className="ghost" disabled={running} onClick={() => askQuestions(k)}>
+                  💬 Preguntar
+                </button>
+              )}
+              <button className="ghost" disabled={running} onClick={() => askGenerate(k)}>
+                Generar
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {running && <span className="small dim">El agente está trabajando…</span>}
+    </div>
+  );
+}
+
+// tarjeta de preguntas pendientes para un documento (respuestas del usuario)
+function QuestionsCard(props: {
+  pending: PendingDoc;
+  meta: { label: string; file: string; icon: string; the: string };
+  running: boolean;
+  openConfirm: (spec: ConfirmSpec) => void;
+  setError: (e: string) => void;
+  updateCurrent: (t: Task) => void;
+  taskId: string;
+  selectedAgent: string;
+}) {
+  const { pending, meta } = props;
+  const [vals, setVals] = useState<Record<string, string>>(() =>
+    Object.fromEntries(pending.questions.map((q) => [q.id, q.answer ?? q.suggestion ?? ""])),
+  );
+  const save = async () => {
+    try {
+      const t = await invoke<Task>("answer_doc", {
+        taskId: props.taskId,
+        kind: pending.kind,
+        answers: pending.questions.map((q) => ({ id: q.id, text: vals[q.id] ?? "" })),
+      });
+      props.updateCurrent(t);
+    } catch (e) {
+      props.setError(String(e));
+    }
+  };
+  const allFilled = pending.questions.every((q) => (vals[q.id] ?? "").trim() !== "");
+  return (
+    <div className="questions-card">
+      <div className="questions-head">
+        <span className="artifact-icon" aria-hidden="true">💬</span>
+        <strong>El agente tiene preguntas sobre {meta.the}</strong>
       </div>
-      {nextLabel && !running && (
-        <button className="primary block" onClick={() => askGenerate(nextKind)}>
-          Generar {nextLabel}
+      {pending.questions.map((q, i) => (
+        <label key={q.id} className="question-row">
+          <span className="q-text">{i + 1}. {q.text}</span>
+          {q.suggestion && (
+            <span className="q-suggestion">Sugerencia del agente: {q.suggestion}</span>
+          )}
+          <textarea
+            value={vals[q.id] ?? ""}
+            placeholder="Tu respuesta (opcional)"
+            onChange={(e) => setVals((v) => ({ ...v, [q.id]: e.target.value }))}
+          />
+        </label>
+      ))}
+      <div className="questions-actions">
+        <button onClick={save}>Guardar respuestas</button>
+        <button
+          className="primary"
+          disabled={!allFilled || props.running}
+          title={allFilled ? "" : "Responde todas las preguntas para generar el documento"}
+          onClick={() =>
+            props.openConfirm({
+              title: "¿Generar con tus respuestas?",
+              message: `Se escribirá ${meta.the} incorporando tus respuestas. Las preguntas quedarán respondidas.`,
+              confirmLabel: "Generar",
+              onConfirm: async () => {
+                await save();
+                try {
+                  await invoke("generate_doc", { taskId: props.taskId, agentId: props.selectedAgent, kind: pending.kind });
+                } catch (e) {
+                  props.setError(String(e));
+                }
+              },
+            })
+          }
+        >
+          Generar {meta.label}
         </button>
-      )}
-      {brief && (
-        <DocArtifact
-          icon="🎯"
-          title="brief.md"
-          content={brief.content}
-          createdAt={brief.createdAt}
-          onDelete={() => confirmDelete("brief", "el brief")}
-        />
-      )}
-      {arch && (
-        <DocArtifact
-          icon="🏗"
-          title="architecture.md"
-          content={arch.content}
-          createdAt={arch.createdAt}
-          onDelete={() => confirmDelete("architecture", "el documento de arquitectura")}
-        />
-      )}
-      {flows && (
-        <DocArtifact
-          icon="🔀"
-          title="flows.md"
-          content={flows.content}
-          createdAt={flows.createdAt}
-          onDelete={() => confirmDelete("flows", "el documento de flujos")}
-        />
-      )}
+      </div>
     </div>
   );
 }
@@ -1542,7 +1583,7 @@ function TaskView(props: {
 
       <Stepper stage={stage} onGo={(s) => {
         if (s === 1) document.querySelector<HTMLInputElement>(".new-task-inline")?.focus();
-        if (s === 2) document.querySelector<HTMLElement>(".spec-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (s === 2) document.querySelector<HTMLElement>(".plan-docs")?.scrollIntoView({ behavior: "smooth", block: "start" });
         if (s >= 3) document.querySelector<HTMLElement>(".approval-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }} />
 
@@ -1627,9 +1668,6 @@ function TaskView(props: {
 
       <div className="cols">
         <section className="col">
-          <h2 className="spec-anchor">Spec</h2>
-          <SpecArtifact task={task} />
-
           <h2>Tickets ({task.tickets.length})</h2>
           <div className="tickets">
             {task.tickets.map((tk) => {

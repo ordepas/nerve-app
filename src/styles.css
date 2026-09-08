@@ -387,10 +387,36 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 }
 .artifact-body.md hr { border: none; border-top: 1px solid var(--border-soft); margin: 12px 0; }
 
-/* ---------- artefactos de planificación (brief/arquitectura/flujos) ---------- */
+/* ---------- artefactos de planificación (brief/arquitectura/flujos/spec) ---------- */
 .plan-docs { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 18px; }
 .plan-docs-progress { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plan-docs .artifact-body { max-height: 360px; }
+.doc-step {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 1px dashed var(--border); border-radius: var(--radius-lg);
+  background: rgba(255,255,255,0.01);
+}
+.doc-step-info { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.doc-step-info .artifact-icon { width: 28px; height: 28px; font-size: 14px; opacity: 0.85; }
+.doc-step-info strong { font-size: 13px; display: block; }
+.doc-step-actions { display: flex; gap: 4px; flex: none; }
+.questions-card {
+  border: 1px solid var(--accent); border-radius: var(--radius-lg);
+  padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;
+  background: var(--accent-soft);
+}
+.questions-head { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+.question-row { display: flex; flex-direction: column; gap: 4px; }
+.q-text { font-size: 13px; color: var(--text); }
+.q-suggestion { font-size: 12px; color: var(--muted); font-style: italic; }
+.question-row textarea {
+  width: 100%; min-height: 44px; resize: vertical;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 6px 9px; font: inherit; font-size: 13px;
+}
+.question-row textarea:focus { outline: none; border-color: var(--accent); }
+.questions-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* ---------- misc ---------- */
 .mono { font-family: var(--mono); }
