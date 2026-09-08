@@ -356,24 +356,50 @@ interface FieldDef {
   required?: boolean;
 }
 
-// tarjeta de documento de planificación (brief / arquitectura / flujos)
-function DocArtifact(props: {
-  icon: ReactNode;
+// fila compacta de la lista de documentos: doble clic (o Ver) abre el lector
+function ArtifactRow(props: {
+  icon: string;
   title: string;
-  content: string;
-  createdAt: number;
-  busy?: boolean;
+  sub: ReactNode;
+  onOpen: () => void;
   onDelete?: () => void;
-  children?: ReactNode;
+}) {
+  return (
+    <div
+      className="artifact-row"
+      onDoubleClick={props.onOpen}
+      title="Doble clic para ver el documento"
+    >
+      <span className="artifact-icon" aria-hidden="true">{props.icon}</span>
+      <div className="artifact-title">
+        <strong>{props.title}</strong>
+        <span className="artifact-sub">{props.sub}</span>
+      </div>
+      <div className="artifact-actions">
+        <button className="ghost" onClick={props.onOpen}>Ver</button>
+        {props.onDelete && (
+          <button className="ghost" onClick={props.onDelete} title="Eliminar este documento">🗑</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// lector modal de un documento (markdown renderizado, copiar/descargar)
+function DocViewerModal(props: {
+  icon: string;
+  title: string;
+  sub: ReactNode;
+  content: string;
+  onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const [open, setOpen] = useState(true);
   const download = () => {
     const blob = new Blob([props.content], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = props.title;
+    a.download = props.title.endsWith(".md") ? props.title : `${props.title}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -387,42 +413,37 @@ function DocArtifact(props: {
     }
   };
   return (
-    <div className="artifact">
-      <div className="artifact-head">
-        <span className="artifact-icon" aria-hidden="true">{props.icon}</span>
-        <div className="artifact-title">
-          <strong>{props.title}</strong>
-          <span className="artifact-sub">
-            {props.content.split("\n").length} líneas · {fmtTime(props.createdAt)}
-          </span>
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal doc-viewer" onClick={(e) => e.stopPropagation()}>
+        <div className="doc-viewer-head">
+          <span className="artifact-icon" aria-hidden="true">{props.icon}</span>
+          <div className="artifact-title">
+            <strong>{props.title}</strong>
+            <span className="artifact-sub">{props.sub}</span>
+          </div>
+          <div className="artifact-actions">
+            <button className="ghost" onClick={copy}>{copied ? "✓ Copiado" : "Copiar"}</button>
+            <button className="ghost" onClick={download}>Descargar</button>
+            <button className="ghost" onClick={props.onClose}>✕ Cerrar</button>
+          </div>
         </div>
-        <div className="artifact-actions">
-          {props.onDelete && (
-            <button className="ghost" onClick={props.onDelete} title="Eliminar este documento">🗑</button>
-          )}
-          <button className="ghost" onClick={() => setOpen(!open)}>{open ? "Contraer" : "Ver"}</button>
-          <button className="ghost" onClick={copy}>{copied ? "✓ Copiado" : "Copiar"}</button>
-          <button className="ghost" onClick={download}>Descargar</button>
-        </div>
-      </div>
-      {open && (
         <div
-          className="artifact-body md"
+          className="doc-viewer-body artifact-body md"
           dangerouslySetInnerHTML={{ __html: renderMarkdown(props.content) }}
         />
-      )}
-      {props.children}
+      </div>
     </div>
   );
 }
 
 // sección de artefactos del plan: brief → arquitectura → flujos → spec,
-// con fase de preguntas del agente antes de cada documento y confirmación
-// para generarlo (estilo Traycer)
+// listada como navegación (doble clic abre el lector), con fase de preguntas
+// del agente antes de cada documento y confirmación para generarlo
 function PlanArtifactsSection(props: {
   task: Task;
   selectedAgent: string;
   busy: boolean;
+  techMode: boolean;
   openConfirm: (spec: ConfirmSpec) => void;
   setError: (e: string) => void;
   updateCurrent: (t: Task) => void;
@@ -431,6 +452,9 @@ function PlanArtifactsSection(props: {
   const artifacts = task.planArtifacts ?? [];
   const pendings = task.pendingDocs ?? [];
   const running = props.busy;
+  const [viewer, setViewer] = useState<null | {
+    icon: string; title: string; sub: ReactNode; content: string;
+  }>(null);
   const byKind = (k: string) => artifacts.find((a) => a.kind === k);
   const pendingByKind = (k: string) => pendings.find((p) => p.kind === k);
 
@@ -441,6 +465,19 @@ function PlanArtifactsSection(props: {
     spec: { label: "Spec", file: "spec.md", icon: "📄", the: "la especificación" },
   };
   const order = ["brief", "architecture", "flows", "spec"];
+  const nextKind = order.find((k) => !byKind(k));
+  const nextMeta = nextKind ? DOC_META[nextKind] : null;
+
+  const openViewer = (k: string) => {
+    const meta = DOC_META[k];
+    const a = byKind(k);
+    if (!a) return;
+    const lines = a.content.split("\n").length;
+    const sub = props.techMode
+      ? <>{k} · {lines} líneas · {fmtTime(a.createdAt)}</>
+      : <>{lines} líneas · {fmtTime(a.createdAt)}</>;
+    setViewer({ icon: meta.icon, title: props.techMode ? meta.file : meta.label, sub, content: a.content });
+  };
 
   const askGenerate = (kind: string) => {
     const meta = DOC_META[kind];
@@ -492,65 +529,86 @@ function PlanArtifactsSection(props: {
     });
   };
 
-  const nextKind = order.find((k) => !byKind(k));
-
   return (
     <div className="plan-docs">
-      {order.map((k) => {
-        const meta = DOC_META[k];
-        const a = byKind(k);
-        const p = pendingByKind(k);
-        const isNext = k === nextKind;
-        if (a) {
+      <div className="doc-list" role="list">
+        {order.map((k) => {
+          const meta = DOC_META[k];
+          const a = byKind(k);
+          const p = pendingByKind(k);
+          if (a) {
+            const lines = a.content.split("\n").length;
+            const sub = props.techMode
+              ? <>{k} · {lines} líneas · {fmtTime(a.createdAt)}</>
+              : <>{lines} líneas · {fmtTime(a.createdAt)}</>;
+            return (
+              <ArtifactRow
+                key={k}
+                icon={meta.icon}
+                title={props.techMode ? meta.file : meta.label}
+                sub={sub}
+                onOpen={() => openViewer(k)}
+                onDelete={() => confirmDelete(k)}
+              />
+            );
+          }
+          if (p) {
+            return (
+              <QuestionsCard
+                key={k}
+                pending={p}
+                meta={meta}
+                running={running}
+                openConfirm={props.openConfirm}
+                setError={props.setError}
+                updateCurrent={props.updateCurrent}
+                taskId={task.id}
+                selectedAgent={props.selectedAgent}
+              />
+            );
+          }
+          const isNext = k === nextKind;
+          const pendingLabel = props.techMode ? `${meta.file} · pendiente` : `${meta.label} — aún no generado`;
           return (
-            <DocArtifact
-              key={k}
-              icon={meta.icon}
-              title={meta.file}
-              content={a.content}
-              createdAt={a.createdAt}
-              onDelete={() => confirmDelete(k)}
-            />
-          );
-        }
-        if (p) {
-          return (
-            <QuestionsCard
-              key={k}
-              pending={p}
-              meta={meta}
-              running={running}
-              openConfirm={props.openConfirm}
-              setError={props.setError}
-              updateCurrent={props.updateCurrent}
-              taskId={task.id}
-              selectedAgent={props.selectedAgent}
-            />
-          );
-        }
-        return (
-          <div key={k} className="doc-step">
-            <div className="doc-step-info">
-              <span className="artifact-icon" aria-hidden="true">{meta.icon}</span>
-              <div>
-                <strong>{meta.file}</strong>
-                <span className="artifact-sub">{meta.label} — aún no generado</span>
+            <div key={k} className="doc-step" role="listitem">
+              <div className="doc-step-info">
+                <span className="artifact-icon" aria-hidden="true">{meta.icon}</span>
+                <div>
+                  <strong>{props.techMode ? meta.file : meta.label}</strong>
+                  <span className="artifact-sub">{pendingLabel}</span>
+                </div>
+              </div>
+              <div className="doc-step-actions">
+                {isNext && (
+                  <button className="ghost" disabled={running} onClick={() => askQuestions(k)}>
+                    💬 Preguntar
+                  </button>
+                )}
+                {isNext && (
+                  <button className="ghost" disabled={running} onClick={() => askGenerate(k)}>
+                    Generar
+                  </button>
+                )}
+                {!isNext && (
+                  <span className="doc-step-wait">
+                    Sigue después de {nextMeta ? nextMeta.label.toLowerCase() : "el documento anterior"}
+                  </span>
+                )}
               </div>
             </div>
-            <div className="doc-step-actions">
-              {isNext && (
-                <button className="ghost" disabled={running} onClick={() => askQuestions(k)}>
-                  💬 Preguntar
-                </button>
-              )}
-              <button className="ghost" disabled={running} onClick={() => askGenerate(k)}>
-                Generar
-              </button>
-            </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
       {running && <span className="small dim">El agente está trabajando…</span>}
+      {viewer && (
+        <DocViewerModal
+          icon={viewer.icon}
+          title={viewer.title}
+          sub={viewer.sub}
+          content={viewer.content}
+          onClose={() => setViewer(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1591,6 +1649,7 @@ function TaskView(props: {
         task={task}
         selectedAgent={props.selectedAgent}
         busy={props.runs.some((r) => r.status === "running")}
+        techMode={props.techMode}
         openConfirm={props.openConfirm}
         setError={props.setError}
         updateCurrent={props.updateCurrent}
@@ -1680,7 +1739,7 @@ function TaskView(props: {
                 >
                   <div className="ticket-head">
                     <span className={`tstate st-${tk.status}`} />
-                    <strong>{tk.id}</strong> {tk.title}
+                    {props.techMode && <strong>{tk.id}</strong>} {tk.title}
                     <span className="chip">{humanStatus(TICKET_STATUS, tk.status)}</span>
                     {tk.approved && <span className="chip chip-approved">aprobado</span>}
                     <span className="chev">{open ? "▾" : "▸"}</span>
@@ -1932,6 +1991,7 @@ function RunsPanel(props: {
               <StatusDot status={r.status} map={RUN_STATUS} />
               <span className="small">{agentLabel(r.agent)}</span>
               <span className="small dim">{runKindLabel(r.mode, props.techMode)}</span>
+              {props.techMode && <span className="mono small dim">{r.id.slice(-4)}</span>}
               <span className="small dim">{fmtTime(r.startedAt)}</span>
               {r.summary && props.techMode && <span className="small dim flex1">{r.summary}</span>}
               {r.status === "running" && (

@@ -41,8 +41,14 @@ pub fn doc_output(kind: &str, task: &crate::model::Task, context: &str) -> Strin
         "architecture" => format!(
             "# Arquitectura (demo)\n\n## Estructura\n- Cambio autocontenido en la raíz del workspace\n\n## Tecnologías\n- Las ya presentes en el repositorio (sin dependencias nuevas)\n\n## Datos\n- Estáticos, embebidos en el propio entregable\n\n> Generado por el agente simulado de Nerve.\n"
         ),
-        _ => format!(
+        "flows" => format!(
             "# Flujos (demo)\n\n## Flujo principal\n1. El usuario abre el entregable\n2. Recorre el contenido generado\n3. Confirma que corresponde a la intención: {intent}\n\n## Casos límite\n- Sin conexión: el entregable sigue funcionando (contenido estático)\n\n> Generado por el agente simulado de Nerve.\n"
+        ),
+        "spec" => format!(
+            "# Especificación (demo)\n\n**Intención:** {intent}\n\n## Alcance\n- Entregar lo pedido de forma mínima y verificable\n\n## Decisiones de diseño\n- Un único entregable, sin dependencias nuevas\n\n## Criterios de aceptación\n- El resultado corresponde a la intención: {intent}\n- El cambio queda visible en el diff de la ejecución\n\n> Generado por el agente simulado de Nerve.\n"
+        ),
+        _ => format!(
+            "# Documento (demo)\n\nSección no implementada para kind solicitado.\n\n> Generado por el agente simulado de Nerve.\n"
         ),
     }
 }
