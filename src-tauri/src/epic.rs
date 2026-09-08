@@ -333,18 +333,19 @@ pub fn kick(
     let _ = app.emit("epic-updated", &epic);
 
     let app2 = app.clone();
+    let app3 = app.clone();
     let store2 = store.clone();
     let registry2 = registry.clone();
     let id = epic_id.to_string();
     std::thread::spawn(move || {
         if let Err(e) = engine_loop(app2, &store2, &registry2, &id) {
-            let _ = fail_epic(&store2, &id, e);
+            let _ = fail_epic(&app3, &store2, &id, e);
         }
     });
     Ok(epic)
 }
 
-fn fail_epic(store: &Store, epic_id: &str, e: String) -> Result<EpicDef, String> {
+fn fail_epic(app: &AppHandle, store: &Store, epic_id: &str, e: String) -> Result<EpicDef, String> {
     let mut epic = load_epic(store, epic_id)?;
     if epic.status == "cancelled" {
         return Ok(epic);
@@ -354,6 +355,7 @@ fn fail_epic(store: &Store, epic_id: &str, e: String) -> Result<EpicDef, String>
     epic.current_run = None;
     epic.updated_at = now_ms();
     save_epic(store, &epic)?;
+    let _ = app.emit("epic-updated", &epic);
     Ok(epic)
 }
 
@@ -395,6 +397,8 @@ fn approve_tickets(store: &Store, task_id: &str, app: &AppHandle) -> Result<Task
 }
 
 /// Lanza un run de planificación para `task` dentro del epic (bloqueante).
+/// El Run devuelto se recarga del store para incluir sus eventos (el plan
+/// JSON queda persistido como evento "plan").
 fn plan_one(
     app: &AppHandle,
     store: &Store,
@@ -424,7 +428,7 @@ fn plan_one(
     epic.updated_at = now_ms();
     save_epic(store, epic)?;
     let _ = app.emit("epic-updated", &*epic);
-    Ok(run)
+    Ok(store.load_run(&run.task_id, &run.id)?)
 }
 
 /// Ejecuta una task del epic en worktree propio (bloqueante).
@@ -478,6 +482,7 @@ fn gate_if_running(
 
 /// Cierra un run dentro del motor: true = seguir; false = parar (ya marcado).
 fn handle_run_end(
+    app: &AppHandle,
     store: &Store,
     epic_id: &str,
     epic: &mut EpicDef,
@@ -492,6 +497,7 @@ fn handle_run_end(
         }
         _ => {
             fail_epic(
+                &app,
                 store,
                 epic_id,
                 run.summary
@@ -527,7 +533,7 @@ fn engine_loop(
                 _ => {
                     let task = store.load_task(&epic.plan_task_id)?;
                     let run = plan_one(&app, store, registry, &mut epic, &task)?;
-                    if !handle_run_end(store, epic_id, &mut epic, &run, "la planificación del epic falló")? {
+                    if !handle_run_end(&app, store, epic_id, &mut epic, &run, "la planificación del epic falló")? {
                         return Ok(());
                     }
                     tickets_from_run(&run)?
@@ -575,6 +581,7 @@ fn engine_loop(
                     continue;
                 }
                 fail_epic(
+                    &app,
                     store,
                     epic_id,
                     format!(
@@ -591,7 +598,7 @@ fn engine_loop(
             if let Ok(t) = store.load_task(tid) {
                 if t.status == "planning" {
                     let run = plan_one(&app, store, registry, &mut epic, &t)?;
-                    if !handle_run_end(store, epic_id, &mut epic, &run, "la planificación de la fase falló")? {
+                    if !handle_run_end(&app, store, epic_id, &mut epic, &run, "la planificación de la fase falló")? {
                         return Ok(());
                     }
                     // plan sin tickets → task completa (solo documentación)
@@ -631,12 +638,13 @@ fn engine_loop(
                         continue;
                     }
                     let run = exec_one(&app, store, registry, &mut epic, &t)?;
-                    if !handle_run_end(store, epic_id, &mut epic, &run, "la ejecución de la fase falló")? {
+                    if !handle_run_end(&app, store, epic_id, &mut epic, &run, "la ejecución de la fase falló")? {
                         return Ok(());
                     }
                     let fresh = store.load_task(&t.id)?;
                     if fresh.status == "blocked" {
                         fail_epic(
+                            &app,
                             store,
                             epic_id,
                             format!(

@@ -400,9 +400,11 @@ export default function App() {
   const epicAction = useCallback(async (cmd: "start_epic" | "continue_epic" | "cancel_epic", id: string) => {
     try {
       const updated = await invoke<EpicDef>(cmd, { id });
+      // el motor puede haber emitido epic-updated más nuevo que este invoke
       setEpics((prev) => {
         const i = prev.findIndex((x) => x.id === id);
         if (i < 0) return [updated, ...prev];
+        if (prev[i].updatedAt >= updated.updatedAt) return prev;
         const copy = [...prev];
         copy[i] = updated;
         return copy;
