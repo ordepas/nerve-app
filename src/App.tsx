@@ -106,6 +106,8 @@ type ConfirmSpec = {
   onConfirm: () => void;
 };
 
+const TECH_KEY = "nerve.techMode";
+
 // ---------- helpers ----------
 
 const fmtTime = (ms: number) =>
@@ -116,8 +118,63 @@ const fmtTime = (ms: number) =>
     minute: "2-digit",
   });
 
-function statusChip(s: string) {
-  return <span className={`chip chip-${s}`}>{s}</span>;
+// estados en lenguaje humano (capa no técnica); el texto crudo queda para el modo técnico
+const TASK_STATUS: Record<string, string> = {
+  planning: "Creando el plan…",
+  ready: "Esperando tu aprobación",
+  in_dev: "En construcción",
+  done: "Completada",
+  blocked: "Necesita tu atención",
+  cancelled: "Detenida",
+  failed: "Falló",
+};
+
+const TICKET_STATUS: Record<string, string> = {
+  todo: "Pendiente",
+  in_dev: "En construcción",
+  done: "Hecho",
+  blocked: "Bloqueado",
+};
+
+const RUN_STATUS: Record<string, string> = {
+  running: "Trabajando…",
+  done: "Hecho",
+  failed: "Falló",
+  cancelled: "Detenido",
+};
+
+function humanStatus(map: Record<string, string>, s: string) {
+  return map[s] ?? s;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  mock: "Agente simulado (pruebas)",
+  qwen: "Qwen Code",
+  claude: "Claude Code",
+  codex: "Codex",
+  gemini: "Gemini CLI",
+  ollama: "Ollama (local)",
+  opencode: "OpenCode",
+};
+
+function agentLabel(id: string) {
+  return AGENT_LABELS[id] ?? id;
+}
+
+function runKindLabel(mode: string, techMode: boolean) {
+  if (techMode) return mode;
+  if (mode === "plan") return "solo planifica";
+  if (mode === "workspace") return "directo en tu proyecto";
+  return "en copia aislada";
+}
+
+function StatusDot({ status, map }: { status: string; map: Record<string, string> }) {
+  return (
+    <span className={`status-pill st-${status}`}>
+      <span className="dot" />
+      {humanStatus(map, status)}
+    </span>
+  );
 }
 
 // ---------- modal ----------
@@ -234,6 +291,22 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalSpec | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [techMode, setTechMode] = useState(() => {
+    try {
+      return localStorage.getItem(TECH_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleTechMode = useCallback((v: boolean) => {
+    setTechMode(v);
+    try {
+      localStorage.setItem(TECH_KEY, v ? "1" : "0");
+    } catch {
+      /* noop */
+    }
+  }, []);
 
   const openModal = useCallback((spec: ModalSpec) => setModal(spec), []);
   const openConfirm = useCallback((spec: ConfirmSpec) => setConfirm(spec), []);
@@ -364,11 +437,12 @@ export default function App() {
         onOpenTask={openTask}
         onNewTask={async () => {
           openModal({
-            title: "Nueva task",
+            title: "¿Qué quieres construir?",
             fields: [
-              { key: "title", label: "Título de la tarea", required: true },
-              { key: "intent", label: "Intención (¿qué quieres lograr?)", multiline: true, required: true },
+              { key: "title", label: "Ponle un nombre a esta idea", required: true },
+              { key: "intent", label: "Descríbela con tus palabras (qué quieres lograr)", multiline: true, required: true },
             ],
+            submitLabel: "Empezar",
             onSubmit: async (values) => {
               setModal(null);
               try {
@@ -406,6 +480,8 @@ export default function App() {
             setSelectedAgent={setSelectedAgent}
             runMode={runMode}
             setRunMode={setRunMode}
+            techMode={techMode}
+            onTechMode={toggleTechMode}
             updateCurrent={updateCurrent}
             setError={setError}
             openModal={openModal}
@@ -505,13 +581,13 @@ function Sidebar(props: {
   return (
     <aside className="sidebar">
       <div className="brand">
-        ⚡ Nerve <span className="sub">spec-first workspace</span>
+        ⚡ Nerve <span className="sub">de la idea al código, con control</span>
       </div>
       <button className="primary block" onClick={props.onNewTask}>
-        + Nueva task
+        + Empezar algo nuevo
       </button>
       <div className="list">
-        {props.tasks.length === 0 && <div className="empty">Aún no hay tasks</div>}
+        {props.tasks.length === 0 && <div className="empty">Aún no hay nada aquí</div>}
         {props.tasks.map((t) => (
           <div
             key={t.id}
@@ -520,7 +596,8 @@ function Sidebar(props: {
           >
             <div className="item-title">{t.title}</div>
             <div className="item-sub">
-              {t.tickets.length} ticket(s) · {t.status}
+              {humanStatus(TASK_STATUS, t.status)}
+              {t.tickets.length > 0 && ` · ${t.tickets.filter((x) => x.status === "done").length}/${t.tickets.length}`}
             </div>
           </div>
         ))}
@@ -542,15 +619,19 @@ function Home(props: {
 }) {
   return (
     <div className="page">
-      <h1>Tus tasks</h1>
-      <p className="hint">
-        Cada task convierte una intención en spec + tickets, y se ejecuta aislada
-        con checkpoints de git.
-      </p>
+      <div className="hero">
+        <h1>¿Qué quieres construir hoy?</h1>
+        <p className="hero-sub">
+          Descríbelo en tus palabras. Nerve crea un plan, tú lo apruebas y los
+          agentes lo construyen — con una copia de seguridad de tu proyecto en cada paso.
+        </p>
+      </div>
+      <h2>Tus proyectos</h2>
       {props.tasks.length === 0 ? (
         <div className="empty-card">
-          Crea tu primera task con “+ Nueva task”. Prueba con el
-          <b> agente simulado</b> para ver el flujo completo sin consumir tokens.
+          Aún no hay nada aquí. Pulsa <b>“+ Empezar algo nuevo”</b> para crear tu
+          primera tarea. Puedes probarla con el <b>agente simulado</b> para ver el
+          flujo completo sin gastar tokens.
         </div>
       ) : (
         <div className="grid">
@@ -559,7 +640,14 @@ function Home(props: {
               <div className="card-title">{t.title}</div>
               <div className="card-sub">{t.intent.slice(0, 120)}</div>
               <div className="card-meta">
-                {t.status} · {t.tickets.length} tickets · {fmtTime(t.updatedAt)}
+                <StatusDot status={t.status} map={TASK_STATUS} />
+                <span className="dim">
+                  {t.tickets.length === 0
+                    ? "sin plan todavía"
+                    : `${t.tickets.filter((x) => x.status === "done").length} de ${t.tickets.length} cambios listos`}
+                  {" · "}
+                  {fmtTime(t.updatedAt)}
+                </span>
               </div>
             </div>
           ))}
@@ -581,6 +669,8 @@ function TaskView(props: {
   setSelectedAgent: (a: string) => void;
   runMode: string;
   setRunMode: (m: string) => void;
+  techMode: boolean;
+  onTechMode: (v: boolean) => void;
   updateCurrent: (t: Task) => void;
   setError: (e: string) => void;
   openModal: (spec: ModalSpec) => void;
@@ -588,8 +678,13 @@ function TaskView(props: {
   refreshRuns: () => Promise<void>;
 }) {
   const { task } = props;
-  const approvedPending = task.tickets.filter((t) => t.approved && t.status !== "done");
   const [resumeSession, setResumeSession] = useState(false);
+  const [detail, setDetail] = useState<{ type: "ticket" | "run"; id: string } | null>(null);
+  const approvedPending = task.tickets.filter((t) => t.approved && t.status !== "done");
+  const doneTickets = task.tickets.filter((t) => t.status === "done");
+  const planned = task.tickets.length > 0 && !!task.specCurrent;
+  const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
+  const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
   // resume disponible si el agente elegido ya corrió con éxito en esta task
   const lastRunSameAgent = props.runs.find((r) => r.agent === props.selectedAgent && r.status === "done" && r.sessionId);
   const canResume = (props.selectedAgent === "qwen" || props.selectedAgent === "claude") && !!lastRunSameAgent;
@@ -655,7 +750,17 @@ function TaskView(props: {
     <div className="page taskview">
       <div className="taskhead">
         <h1>{task.title}</h1>
-        {statusChip(task.status)}
+        <StatusDot status={task.status} map={TASK_STATUS} />
+        {props.techMode && <span className="mono small">{task.status}</span>}
+        <span style={{ flex: 1 }} />
+        <label className="tech-toggle" title="Muestra detalles para desarrolladores: ids, sesiones, rutas, comandos">
+          <input
+            type="checkbox"
+            checked={props.techMode}
+            onChange={(e) => props.onTechMode(e.target.checked)}
+          />
+          Modo técnico
+        </label>
         <button className="ghost" onClick={() => {
           props.openModal({
             title: "Editar task",
@@ -676,42 +781,68 @@ function TaskView(props: {
           });
         }}>✎</button>
       </div>
-      <p className="hint mono">{task.intent}</p>
+      {props.techMode ? (
+        <p className="hint mono">{task.intent}</p>
+      ) : (
+        <p className="task-intent">{task.intent}</p>
+      )}
 
-      <div className="toolbar">
-        <select value={props.selectedAgent} onChange={(e) => props.setSelectedAgent(e.target.value)}>
-          {props.agents.map((a) => (
-            <option key={a.id} value={a.id}>{a.label}</option>
-          ))}
-        </select>
-        <select value={props.runMode} onChange={(e) => props.setRunMode(e.target.value)}>
-          <option value="worktree">Ejecutar en worktree nuevo (aislado)</option>
-          <option value="workspace">Ejecutar en workspace (directo)</option>
-        </select>
-        <button className="primary" onClick={runPlan}>🧠 Generar spec y plan</button>
-        {canResume && (
-          <label className="mono small" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={resumeSession}
-              onChange={(e) => setResumeSession(e.target.checked)}
-            />
-            ↩ continuar sesión ({lastRunSameAgent!.sessionId!.slice(0, 8)})
-          </label>
-        )}
-        <button
-          className="primary"
-          onClick={runExec}
-          disabled={approvedPending.length === 0}
-          title={approvedPending.length === 0 ? "Aprueba al menos un ticket" : ""}
-        >
-          ▶ Ejecutar tickets aprobados ({approvedPending.length})
-        </button>
-      </div>
+      <Stepper stage={stage} onGo={(s) => {
+        if (s === 1) document.querySelector<HTMLInputElement>(".new-task-inline")?.focus();
+        if (s === 2) document.querySelector<HTMLElement>(".spec-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (s >= 3) document.querySelector<HTMLElement>(".approval-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }} />
+
+      {stage < 5 && !props.techMode && (
+        <div className="approval-anchor" />
+      )}
+      {!props.techMode && stage < 5 && (stage === 3 || stage === 4) && (
+        <ApprovalHero
+          count={approvedPending.length}
+          total={task.tickets.length}
+          tickets={task.tickets}
+          onApprove={(tk) => saveTicket({ ...tk, approved: !tk.approved })}
+          onRun={runExec}
+          busy={props.runs.some((r) => r.status === "running")}
+        />
+      )}
+
+      {props.techMode && (
+        <div className="toolbar">
+          <select value={props.selectedAgent} onChange={(e) => props.setSelectedAgent(e.target.value)}>
+            {props.agents.map((a) => (
+              <option key={a.id} value={a.id}>{a.label}</option>
+            ))}
+          </select>
+          <select value={props.runMode} onChange={(e) => props.setRunMode(e.target.value)}>
+            <option value="worktree">Ejecutar en worktree nuevo (aislado)</option>
+            <option value="workspace">Ejecutar en workspace (directo)</option>
+          </select>
+          <button className="primary" onClick={runPlan}>🧠 Generar spec y plan</button>
+          {canResume && (
+            <label className="mono small" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={resumeSession}
+                onChange={(e) => setResumeSession(e.target.checked)}
+              />
+              ↩ continuar sesión ({lastRunSameAgent!.sessionId!.slice(0, 8)})
+            </label>
+          )}
+          <button
+            className="primary"
+            onClick={runExec}
+            disabled={approvedPending.length === 0}
+            title={approvedPending.length === 0 ? "Aprueba al menos un ticket" : ""}
+          >
+            ▶ Ejecutar tickets aprobados ({approvedPending.length})
+          </button>
+        </div>
+      )}
 
       <div className="cols">
         <section className="col">
-          <h2>Spec</h2>
+          <h2 className="spec-anchor">Spec</h2>
           {task.specCurrent ? (
             <>
               <pre className="spec">{task.specCurrent}</pre>
@@ -730,29 +861,48 @@ function TaskView(props: {
 
           <h2>Tickets ({task.tickets.length})</h2>
           <div className="tickets">
-            {task.tickets.map((tk) => (
-              <div key={tk.id} className={`ticket ${tk.status}`}>
-                <div className="ticket-head">
-                  <strong>{tk.id}</strong> {tk.title}
-                  <span className="chip">{tk.status}</span>
-                  {tk.approved && <span className="chip chip-approved">aprobado</span>}
+            {task.tickets.map((tk) => {
+              const open = detail?.type === "ticket" && detail.id === tk.id;
+              return (
+                <div
+                  key={tk.id}
+                  className={`ticket ${tk.status} ${open ? "open" : ""}`}
+                  onClick={() => setDetail(open ? null : { type: "ticket", id: tk.id })}
+                >
+                  <div className="ticket-head">
+                    <span className={`tstate st-${tk.status}`} />
+                    <strong>{tk.id}</strong> {tk.title}
+                    <span className="chip">{humanStatus(TICKET_STATUS, tk.status)}</span>
+                    {tk.approved && <span className="chip chip-approved">aprobado</span>}
+                    <span className="chev">{open ? "▾" : "▸"}</span>
+                  </div>
+                  {open && (
+                    <div className="ticket-body" onClick={(e) => e.stopPropagation()}>
+                      {tk.description && <p>{tk.description}</p>}
+                      {tk.acceptance.length > 0 && (
+                        <ul>{tk.acceptance.map((a, i) => <li key={i}>{a}</li>)}</ul>
+                      )}
+                      <div className="ticket-actions">
+                        <button onClick={() => saveTicket({ ...tk, approved: !tk.approved })}>
+                          {tk.approved ? "Desaprobar" : "Aprobar"}
+                        </button>
+                        <button onClick={() => saveTicket({ ...tk, status: "done" })} disabled={tk.status === "done"}>
+                          Marcar hecho
+                        </button>
+                        <button className="danger" onClick={() => deleteTicket(tk.id)}>Eliminar</button>
+                      </div>
+                      {props.techMode && (
+                        <div className="tech-box mono">
+                          <div>estado: {tk.status}</div>
+                          {tk.verifyCommand && <div>verify: {tk.verifyCommand}</div>}
+                          {tk.dependsOn.length > 0 && <div>dependsOn: {tk.dependsOn.join(", ")}</div>}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {tk.description && <p>{tk.description}</p>}
-                {tk.acceptance.length > 0 && (
-                  <ul>{tk.acceptance.map((a, i) => <li key={i}>{a}</li>)}</ul>
-                )}
-                {tk.verifyCommand && <div className="mono small">✔ {tk.verifyCommand}</div>}
-                <div className="ticket-actions">
-                  <button onClick={() => saveTicket({ ...tk, approved: !tk.approved })}>
-                    {tk.approved ? "Desaprobar" : "Aprobar"}
-                  </button>
-                  <button onClick={() => saveTicket({ ...tk, status: "done" })} disabled={tk.status === "done"}>
-                    Marcar done
-                  </button>
-                  <button className="danger" onClick={() => deleteTicket(tk.id)}>Eliminar</button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <button className="block" onClick={addTicket}>+ Añadir ticket</button>
         </section>
@@ -764,12 +914,88 @@ function TaskView(props: {
             runs={props.runs}
             currentRun={props.currentRun}
             events={props.events}
+            techMode={props.techMode}
+            openDetail={(id) => setDetail({ type: "run", id })}
+            openDetailRunId={detail?.type === "run" ? detail.id : null}
             refreshRuns={props.refreshRuns}
             openConfirm={props.openConfirm}
             setError={props.setError}
           />
         </section>
       </div>
+    </div>
+  );
+}
+
+// ---------- stepper / aprobación ----------
+
+const STEPS = [
+  { n: 1, label: "Cuéntanos qué quieres" },
+  { n: 2, label: "Revisa el plan" },
+  { n: 3, label: "Aprueba" },
+  { n: 4, label: "Se construye" },
+  { n: 5, label: "Listo" },
+];
+
+function Stepper(props: { stage: number; onGo: (s: number) => void }) {
+  return (
+    <div className="stepper">
+      {STEPS.map((s) => {
+        const cls = props.stage > s.n ? "done" : props.stage === s.n ? "current" : "";
+        return (
+          <button key={s.n} className={`step ${cls}`} onClick={() => props.onGo(s.n)}>
+            <span className="step-num">{props.stage > s.n ? "✓" : s.n}</span>
+            {s.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ApprovalHero(props: {
+  count: number;
+  total: number;
+  tickets: Ticket[];
+  onApprove: (tk: Ticket) => void;
+  onRun: () => void;
+  busy: boolean;
+}) {
+  const message =
+    props.count === 0
+      ? props.total === 0
+        ? "Cuando el plan esté listo, verás aquí los cambios propuestos para aprobar."
+        : "No hay cambios esperando aprobación."
+      : undefined;
+  return (
+    <div className="approval-hero">
+      <div className="approval-head">
+        <h3>¿Apruebas este plan?</h3>
+        {props.count > 0 && (
+          <button className="primary" onClick={props.onRun} disabled={props.busy}>
+            Sí, construir {props.count} cambio{props.count === 1 ? "" : "s"}
+          </button>
+        )}
+      </div>
+      {message ? (
+        <p className="modal-message">{message}</p>
+      ) : (
+        <ul className="approval-list">
+          {props.tickets.map((tk) => (
+            <li key={tk.id} className={tk.approved ? "ok" : ""}>
+              <button
+                className="approve-box"
+                title={tk.approved ? "Quitar aprobación" : "Aprobar este cambio"}
+                onClick={() => props.onApprove(tk)}
+              >
+                {tk.approved ? "✓" : ""}
+              </button>
+              <span className="ap-title">{tk.title}</span>
+              {tk.description && <span className="ap-desc">{tk.description}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -781,6 +1007,9 @@ function RunsPanel(props: {
   runs: Run[];
   currentRun: Run | null;
   events: RunEvent[];
+  techMode: boolean;
+  openDetail: (runId: string) => void;
+  openDetailRunId: string | null;
   refreshRuns: () => Promise<void>;
   openConfirm: (spec: ConfirmSpec) => void;
   setError: (e: string) => void;
@@ -803,85 +1032,106 @@ function RunsPanel(props: {
   const worktreeId = (r: Run) => r.worktreePath?.split(/[\\/]/).pop() ?? "";
   const lastRun = props.currentRun ?? props.runs[0] ?? null;
   const liveEvents = lastRun ? props.events : [];
+  const detailRun = props.openDetailRunId;
 
   return (
     <div>
       {props.runs.length === 0 && <div className="empty-card">Sin ejecuciones todavía.</div>}
       <div className="runs">
-        {props.runs.map((r) => (
-          <div key={r.id} className="run-row">
-            <span className={`chip chip-${r.status}`}>{r.status}</span>
-            <span className="mono small">{r.agent}</span>
-            <span className="mono small">{r.mode}</span>
-            <span className="small">{fmtTime(r.startedAt)}</span>
-            {r.status === "running" && (
-              <button
-                className="danger"
-                onClick={async () => {
-                  await invoke("cancel_run", { runId: r.id });
-                  props.refreshRuns();
-                }}
-              >
-                Cancelar
-              </button>
-            )}
-            {r.status === "done" && r.mode !== "plan" && (
-              <button onClick={() => viewDiff(r)}>Ver diff</button>
-            )}
-            {r.worktreePath && r.status === "done" && (
-              <button
-                className="danger"
-                onClick={() => {
-                  props.openConfirm({
-                    title: "Descartar worktree",
-                    message: "Se borrará el worktree y su rama. Los cambios no fusionados se pierden.",
-                    confirmLabel: "Descartar",
-                    danger: true,
-                    onConfirm: async () => {
-                      try {
-                        await invoke("discard_worktree", { id: worktreeId(r) });
-                        await props.refreshRuns();
-                      } catch (e) {
-                        props.setError(String(e));
-                      }
-                    },
-                  });
-                }}
-              >
-                Descartar
-              </button>
-            )}
-            {r.worktreePath && r.status === "done" && (
-              <button
-                onClick={() => {
-                  props.openConfirm({
-                    title: "Fusionar worktree",
-                    message: "Se aplicará el diff del worktree sobre tu rama actual y se limpiará.",
-                    confirmLabel: "Fusionar",
-                    onConfirm: async () => {
-                      try {
-                        await invoke("merge_worktree", { id: worktreeId(r) });
-                        await props.refreshRuns();
-                      } catch (e) {
-                        props.setError(String(e));
-                      }
-                    },
-                  });
-                }}
-              >
-                Fusionar
-              </button>
-            )}
-          </div>
-        ))}
+        {props.runs.map((r) => {
+          const open = detailRun === r.id;
+          return (
+            <div
+              key={r.id}
+              className={`run-row ${open ? "open" : ""}`}
+              onClick={() => props.openDetail(r.id)}
+            >
+              <StatusDot status={r.status} map={RUN_STATUS} />
+              <span className="small">{agentLabel(r.agent)}</span>
+              <span className="small dim">{runKindLabel(r.mode, props.techMode)}</span>
+              <span className="small dim">{fmtTime(r.startedAt)}</span>
+              {r.summary && props.techMode && <span className="small dim flex1">{r.summary}</span>}
+              {r.status === "running" && (
+                <button
+                  className="danger"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await invoke("cancel_run", { runId: r.id });
+                    props.refreshRuns();
+                  }}
+                >
+                  Detener
+                </button>
+              )}
+              {r.status === "done" && r.mode !== "plan" && (
+                <button onClick={(e) => { e.stopPropagation(); viewDiff(r); }}>Ver cambios</button>
+              )}
+              {r.worktreePath && r.status === "done" && (
+                <button
+                  className="danger"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.openConfirm({
+                      title: "Descartar los cambios",
+                      message: "Se borrará la copia aislada donde se trabajó. Los cambios no aplicados se pierden.",
+                      confirmLabel: "Descartar",
+                      danger: true,
+                      onConfirm: async () => {
+                        try {
+                          await invoke("discard_worktree", { id: worktreeId(r) });
+                          await props.refreshRuns();
+                        } catch (e) {
+                          props.setError(String(e));
+                        }
+                      },
+                    });
+                  }}
+                >
+                  Descartar
+                </button>
+              )}
+              {r.worktreePath && r.status === "done" && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.openConfirm({
+                      title: "Aplicar los cambios",
+                      message: "Se aplicará lo construido sobre tu proyecto actual y se limpiará la copia aislada.",
+                      confirmLabel: "Aplicar cambios",
+                      onConfirm: async () => {
+                        try {
+                          await invoke("merge_worktree", { id: worktreeId(r) });
+                          await props.refreshRuns();
+                        } catch (e) {
+                          props.setError(String(e));
+                        }
+                      },
+                    });
+                  }}
+                >
+                  Aplicar cambios
+                </button>
+              )}
+              <span className="chev">{open ? "▾" : "▸"}</span>
+            </div>
+          );
+        })}
       </div>
+
+      {detailRun && (
+        <RunDetail
+          run={props.runs.find((r) => r.id === detailRun) ?? null}
+          techMode={props.techMode}
+          onClose={() => props.openDetail("")}
+        />
+      )}
 
       {lastRun && lastRun.status === "running" && (
         <div className="log" ref={logRef}>
           {liveEvents.length === 0 && <div className="empty">Esperando eventos…</div>}
           {liveEvents.map((ev, i) => (
             <div key={i} className={`log-line log-${ev.kind}`}>
-              <span className="mono">{ev.kind}</span> {ev.text}
+              {props.techMode && <span className="mono">{ev.kind}</span>} {ev.text}
             </div>
           ))}
         </div>
@@ -889,14 +1139,14 @@ function RunsPanel(props: {
 
       {diff && (
         <div className="diff-wrap">
-          <h3>Diff <button className="ghost" onClick={() => setDiff(null)}>✕</button></h3>
+          <h3>{props.techMode ? "Diff" : "Cambios realizados"} <button className="ghost" onClick={() => setDiff(null)}>✕</button></h3>
           {diff.files.length > 0 && (
             <table className="files">
               <tbody>
                 {diff.files.map((f) => (
                   <tr key={f.path}>
                     <td className="mono">{f.path}</td>
-                    <td>{f.status}</td>
+                    <td>{props.techMode ? f.status : { A: "nuevo", M: "modificado", D: "eliminado" }[f.status] ?? f.status}</td>
                     <td className="add">+{f.additions}</td>
                     <td className="del">-{f.deletions}</td>
                   </tr>
@@ -907,6 +1157,36 @@ function RunsPanel(props: {
           <pre className="diff">{diff.diff || "(sin cambios)"}</pre>
         </div>
       )}
+    </div>
+  );
+}
+
+function RunDetail(props: { run: Run | null; techMode: boolean; onClose: () => void }) {
+  if (!props.run) return null;
+  const r = props.run;
+  return (
+    <div className="detail-panel">
+      <div className="detail-head">
+        <h3>{r.agent === "mock" ? "Ejecución" : `Ejecución con ${agentLabel(r.agent)}`}</h3>
+        <button className="ghost" onClick={props.onClose}>✕</button>
+      </div>
+      <div className="detail-grid">
+        <div><span className="k">Estado</span><span>{humanStatus(RUN_STATUS, r.status)}</span></div>
+        <div><span className="k">Tipo</span><span>{r.mode === "plan" ? "Plan (solo lee tu proyecto)" : "Construcción (aplica los cambios)"}</span></div>
+        <div><span className="k">Empezó</span><span>{fmtTime(r.startedAt)}</span></div>
+        {r.finishedAt && <div><span className="k">Terminó</span><span>{fmtTime(r.finishedAt)}</span></div>}
+        {r.summary && <div className="wide"><span className="k">Resumen</span><span>{r.summary}</span></div>}
+        {props.techMode && (
+          <>
+            <div><span className="k">Run id</span><span className="mono">{r.id}</span></div>
+            <div><span className="k">Modo</span><span className="mono">{r.mode}</span></div>
+            {r.worktreePath && <div className="wide"><span className="k">Worktree</span><span className="mono">{r.worktreePath}</span></div>}
+            {r.baseSha && <div><span className="k">SHA base</span><span className="mono">{r.baseSha.slice(0, 10)}</span></div>}
+            {r.checkpointSha && <div><span className="k">Checkpoint</span><span className="mono">{r.checkpointSha.slice(0, 10)}</span></div>}
+            {r.sessionId && <div><span className="k">Sesión</span><span className="mono">{r.sessionId}</span></div>}
+          </>
+        )}
+      </div>
     </div>
   );
 }
