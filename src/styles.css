@@ -323,6 +323,17 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 details { margin-top: 6px; color: var(--muted); font-size: 12px; }
 details summary { cursor: pointer; }
 
+/* ---------- epic mode ---------- */
+.epic-stages { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.epic-stage {
+  font-size: 12.5px; color: var(--muted); padding: 6px 10px;
+  background: var(--surface-2, rgba(255,255,255,0.02));
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.epic-stage.stage-done { color: var(--ok, #4ade80); border-color: var(--ok-soft, rgba(74,222,128,0.25)); }
+.epic-stage.stage-current { color: var(--text); border-color: var(--accent); }
+a.link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+
 /* ---------- modal ---------- */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(5, 6, 9, 0.62);

@@ -86,6 +86,28 @@ interface OllamaModelInfo {
   supportsTools: boolean;
 }
 
+interface EpicStage {
+  title: string;
+  tasks: string[];
+}
+
+interface EpicDef {
+  id: string;
+  title: string;
+  intent: string;
+  planTaskId: string;
+  agentId: string;
+  skillId: string;
+  stages: EpicStage[];
+  currentStage: number;
+  status: string;
+  gate: string;
+  lastError: string | null;
+  currentRun: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface WorkspaceCfg {
   projectPath: string | null;
   ollamaUrl: string;
@@ -151,6 +173,21 @@ const RUN_STATUS: Record<string, string> = {
   done: "Hecho",
   failed: "Falló",
   cancelled: "Detenido",
+};
+
+const EPIC_STATUS: Record<string, string> = {
+  draft: "Borrador",
+  running: "Trabajando…",
+  awaiting_gate: "Esperando tu aprobación",
+  done: "Completado",
+  failed: "Falló",
+  cancelled: "Detenido",
+};
+
+const GATE_LABELS: Record<string, string> = {
+  master: "Revisa el plan maestro y sus fases",
+  plan: "Revisa la especificación de la task",
+  fase: "Revisa los cambios construidos",
 };
 
 function humanStatus(map: Record<string, string>, s: string) {
@@ -288,7 +325,7 @@ function ConfirmModal(props: {
 // ---------- app ----------
 
 export default function App() {
-  const [view, setView] = useState<"home" | "task" | "settings">("home");
+  const [view, setView] = useState<"home" | "task" | "settings" | "epics">("home");
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [current, setCurrent] = useState<Task | null>(null);
@@ -300,6 +337,7 @@ export default function App() {
   // task actualmente abierta: filtra eventos de runs de otras tasks
   const currentTaskIdRef = useRef<string>("");
   const [agents, setAgents] = useState<AgentDef[]>([]);
+  const [epics, setEpics] = useState<EpicDef[]>([]);
   const [selectedAgent, setSelectedAgent] = useState("mock");
   const [runMode, setRunMode] = useState("worktree");
   const [error, setError] = useState<string | null>(null);
@@ -348,6 +386,29 @@ export default function App() {
       setAgents(cfg.agents.filter((a) => a.enabled && a.kind !== "disabled"));
     } catch {
       setAgents([]);
+    }
+  }, []);
+
+  const refreshEpics = useCallback(async () => {
+    try {
+      setEpics(await invoke<EpicDef[]>("list_epics"));
+    } catch {
+      setEpics([]);
+    }
+  }, []);
+
+  const epicAction = useCallback(async (cmd: "start_epic" | "continue_epic" | "cancel_epic", id: string) => {
+    try {
+      const updated = await invoke<EpicDef>(cmd, { id });
+      setEpics((prev) => {
+        const i = prev.findIndex((x) => x.id === id);
+        if (i < 0) return [updated, ...prev];
+        const copy = [...prev];
+        copy[i] = updated;
+        return copy;
+      });
+    } catch (e) {
+      setError(String(e));
     }
   }, []);
 
@@ -424,22 +485,34 @@ export default function App() {
           return copy;
         });
       });
+      const l5 = await listen<EpicDef>("epic-updated", (e) => {
+        const epic = e.payload;
+        setEpics((prev) => {
+          const i = prev.findIndex((x) => x.id === epic.id);
+          if (i < 0) return [epic, ...prev];
+          const copy = [...prev];
+          copy[i] = epic;
+          return copy;
+        });
+        void refreshTasks();
+      });
       if (disposed) {
-        [l1, l2, l3, l4].forEach((l) => l());
+        [l1, l2, l3, l4, l5].forEach((l) => l());
         return;
       }
-      unsubs.push(l1, l2, l3, l4);
+      unsubs.push(l1, l2, l3, l4, l5);
     })();
     return () => {
       disposed = true;
       unsubs.forEach((u) => u());
     };
-  }, [openTask, refreshAgents, refreshTasks, refreshWorkspace]);
+  }, [openTask, refreshAgents, refreshTasks, refreshWorkspace, refreshEpics]);
 
   useEffect(() => {
     void refreshWorkspace();
     void refreshTasks();
     void refreshAgents();
+    void refreshEpics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -470,7 +543,9 @@ export default function App() {
         projectPath={projectPath}
         tasks={tasks}
         currentTaskId={current?.id ?? null}
+        epics={epics}
         onOpenTask={openTask}
+        onOpenEpics={() => setView("epics")}
         onNewTask={async () => {
           openModal({
             title: "¿Qué quieres construir?",
@@ -504,6 +579,68 @@ export default function App() {
         )}
         {view === "home" && (
           <Home tasks={tasks} onOpenTask={openTask} projectPath={projectPath} />
+        )}
+        {view === "epics" && (
+          <EpicsView
+            epics={epics}
+            tasks={tasks}
+            projectPath={projectPath}
+            onNewEpic={() => {
+              openModal({
+                title: "Nuevo epic",
+                fields: [
+                  { key: "title", label: "Ponle un nombre a este epic", required: true },
+                  { key: "intent", label: "Describe el objetivo grande (qué quieres lograr al final)", multiline: true, required: true },
+                ],
+                submitLabel: "Crear epic",
+                onSubmit: async (values) => {
+                  setModal(null);
+                  try {
+                    await invoke<EpicDef>("create_epic", {
+                      title: values.title.trim(),
+                      intent: values.intent.trim(),
+                      agentId: selectedAgent,
+                      skillId: "plan",
+                    });
+                    await refreshEpics();
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                },
+              });
+            }}
+            onStart={(id) => void epicAction("start_epic", id)}
+            onContinue={(id) => void epicAction("continue_epic", id)}
+            onCancel={(id) => {
+              openConfirm({
+                title: "Detener el epic",
+                message: "Se detendrá el trabajo del epic. Las tasks ya construidas no se pierden.",
+                confirmLabel: "Detener",
+                onConfirm: async () => {
+                  setConfirm(null);
+                  await epicAction("cancel_epic", id);
+                },
+              });
+            }}
+            onDelete={(id) => {
+              openConfirm({
+                title: "Eliminar el epic",
+                message: "Se elimina el epic (el plan y las tasks creadas se conservan como tasks normales).",
+                confirmLabel: "Eliminar",
+                danger: true,
+                onConfirm: async () => {
+                  setConfirm(null);
+                  try {
+                    await invoke("delete_epic", { id });
+                    setEpics((prev) => prev.filter((x) => x.id !== id));
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                },
+              });
+            }}
+            onOpenTask={openTask}
+          />
         )}
         {view === "task" && current && (
           <TaskView
@@ -602,15 +739,139 @@ function Onboarding({ onSaved }: { onSaved: (p: string) => void }) {
   );
 }
 
+// ---------- epic mode ----------
+
+function EpicsView(props: {
+  epics: EpicDef[];
+  tasks: Task[];
+  projectPath: string | null;
+  onNewEpic: () => void;
+  onStart: (id: string) => void;
+  onContinue: (id: string) => void;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+  onOpenTask: (id: string) => void;
+}) {
+  return (
+    <div className="page">
+      <div className="hero">
+        <h1>Epic Mode</h1>
+        <p className="hero-sub">
+          Grandes ideas divididas en fases. Nerve planifica el conjunto, tú apruebas
+          fase a fase (plan, especificación y cambios) y los agentes construyen con
+          todo el control de siempre.
+        </p>
+      </div>
+      <h2>Tus epics</h2>
+      {props.epics.length === 0 ? (
+        <div className="empty-card">
+          Aún no hay epics. Un epic toma una intención grande, genera un plan maestro
+          con fases (respetando las dependencias entre tickets) y avanza con tu
+          aprobación en cada gate.
+        </div>
+      ) : (
+        <div className="grid">
+          {props.epics.map((epic) => {
+            const stage = epic.stages[epic.currentStage];
+            const taskById = (id: string) => props.tasks.find((t) => t.id === id);
+            const stageTasks = (stage?.tasks ?? []).map(taskById).filter(Boolean) as Task[];
+            return (
+              <div key={epic.id} className="card">
+                <div className="card-title">{epic.title}</div>
+                <div className="card-sub">{epic.intent.slice(0, 120)}</div>
+                <div className="card-meta">
+                  <StatusDot status={epic.status} map={EPIC_STATUS} />
+                  {epic.stages.length > 0 && (
+                    <span className="dim">
+                      {epic.status === "done"
+                        ? `${epic.stages.length} fase(s)`
+                        : `Fase ${Math.min(epic.currentStage + 1, epic.stages.length)}/${epic.stages.length}`}
+                    </span>
+                  )}
+                </div>
+                {epic.stages.length > 0 && (
+                  <div className="epic-stages">
+                    {epic.stages.map((st, i) => {
+                      const ts = st.tasks.map(taskById).filter(Boolean) as Task[];
+                      const done = ts.length > 0 && ts.every((t) => t.status === "done");
+                      const isCurrent = i === epic.currentStage && epic.status !== "done";
+                      return (
+                        <div
+                          key={st.title + i}
+                          className={`epic-stage ${done ? "stage-done" : ""} ${isCurrent ? "stage-current" : ""}`}
+                        >
+                          {done ? "✓" : isCurrent ? "▶" : "○"} {st.title} ({ts.length})
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {epic.lastError && (
+                  <div className="error-bar">{epic.lastError}</div>
+                )}
+                <div className="card-actions">
+                  {(epic.status === "draft" || epic.status === "failed") && (
+                    <button className="primary" onClick={() => props.onStart(epic.id)}>
+                      {epic.status === "draft" ? "Empezar epic" : "Reintentar epic"}
+                      </button>
+                  )}
+                  {epic.status === "awaiting_gate" && (
+                    <>
+                      <span className="hint">
+                        {GATE_LABELS[epic.gate] ?? "Revisa y continúa"}
+                        {stageTasks.length > 0 && (
+                          <span>
+                            {" · "}
+                            {stageTasks.map((t, i) => (
+                              <span key={t.id}>
+                                {i > 0 && ", "}
+                                <a className="link" onClick={() => props.onOpenTask(t.id)}>{t.title}</a>
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                      <button className="primary" onClick={() => props.onContinue(epic.id)}>
+                        Aprobar y continuar
+                      </button>
+                    </>
+                  )}
+                  {epic.status === "running" && (
+                    <button onClick={() => props.onCancel(epic.id)}>Detener</button>
+                  )}
+                  {(epic.status === "done" || epic.status === "cancelled") && (
+                    <button className="danger" onClick={() => props.onDelete(epic.id)}>
+                      Eliminar
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="row">
+        <button className="primary" onClick={props.onNewEpic}>+ Nuevo epic</button>
+      </div>
+      <p className="hint">
+        Cada gate es una decisión tuya: aprobar planes, revisar especificaciones y
+        aplicar los cambios construidos desde la task correspondiente.
+      </p>
+    </div>
+  );
+}
+
 // ---------- sidebar ----------
 
 function Sidebar(props: {
   view: string;
-  setView: (v: "home" | "task" | "settings") => void;
+  setView: (v: "home" | "task" | "settings" | "epics") => void;
   projectPath: string | null;
   tasks: Task[];
   currentTaskId: string | null;
+  epics: EpicDef[];
   onOpenTask: (id: string) => void;
+  onOpenEpics: () => void;
   onNewTask: () => Promise<void> | void;
   onOpenSettings: () => void;
 }) {
@@ -621,6 +882,9 @@ function Sidebar(props: {
       </div>
       <button className="primary block" onClick={props.onNewTask}>
         + Empezar algo nuevo
+      </button>
+      <button className={`block ${props.view === "epics" ? "active-btn" : ""}`} onClick={props.onOpenEpics}>
+        🗺 Epic Mode{props.epics.length > 0 ? ` (${props.epics.length})` : ""}
       </button>
       <div className="list">
         {props.tasks.length === 0 && <div className="empty">Aún no hay nada aquí</div>}

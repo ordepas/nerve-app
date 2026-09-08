@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod epic;
 mod git;
 mod mock_agent;
 mod model;
@@ -23,7 +24,7 @@ pub struct AppState {
 }
 
 #[cfg(windows)]
-fn kill_pid(pid: u32) {
+pub fn kill_pid(pid: u32) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let _ = std::process::Command::new("taskkill")
@@ -33,7 +34,7 @@ fn kill_pid(pid: u32) {
 }
 
 #[cfg(not(windows))]
-fn kill_pid(pid: u32) {
+pub fn kill_pid(pid: u32) {
     let _ = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
         .output();
@@ -134,6 +135,55 @@ fn delete_skill(id: String, state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 fn import_skill(path: String, state: State<AppState>) -> Result<String, String> {
     skills::import_skill(&state.store, &path)
+}
+
+// ---------- epics ----------
+
+#[tauri::command]
+fn list_epics(state: State<AppState>) -> Result<Vec<epic::EpicDef>, String> {
+    epic::list_epics(&state.store)
+}
+
+#[tauri::command]
+fn create_epic(
+    title: String,
+    intent: String,
+    agent_id: String,
+    skill_id: String,
+    state: State<AppState>,
+) -> Result<epic::EpicDef, String> {
+    epic::create_epic(&state.store, &title, &intent, &agent_id, &skill_id)
+}
+
+#[tauri::command]
+fn start_epic(
+    app: AppHandle,
+    id: String,
+    state: State<AppState>,
+) -> Result<epic::EpicDef, String> {
+    epic::kick(&app, &state.store, &state.registry, &id, &["draft", "awaiting_gate", "failed"])
+}
+
+#[tauri::command]
+fn continue_epic(
+    app: AppHandle,
+    id: String,
+    state: State<AppState>,
+) -> Result<epic::EpicDef, String> {
+    epic::kick(&app, &state.store, &state.registry, &id, &["awaiting_gate"])
+}
+
+#[tauri::command]
+fn cancel_epic(
+    id: String,
+    state: State<AppState>,
+) -> Result<epic::EpicDef, String> {
+    epic::cancel_epic(&state.store, &state.registry, &id)
+}
+
+#[tauri::command]
+fn delete_epic(id: String, state: State<AppState>) -> Result<(), String> {
+    epic::delete_epic(&state.store, &id)
 }
 
 // ---------- tasks ----------
@@ -434,6 +484,13 @@ pub fn run() {
                 Err(e) => eprintln!("nerve: no se pudieron limpiar runs huérfanos: {}", e),
                 _ => {}
             }
+            match epic::fail_stale_running(&state.store) {
+                Ok(n) if n > 0 => {
+                    eprintln!("nerve: {} epic(s) huérfano(s) marcados como failed", n);
+                }
+                Err(e) => eprintln!("nerve: no se pudieron limpiar epics huérfanos: {}", e),
+                _ => {}
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -467,6 +524,12 @@ pub fn run() {
             save_skill,
             delete_skill,
             import_skill,
+            list_epics,
+            create_epic,
+            start_epic,
+            continue_epic,
+            cancel_epic,
+            delete_epic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
