@@ -411,6 +411,30 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 .next-strip button { flex: none; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
+/* ---------- task: chat principal + panel lateral del flujo SDD ---------- */
+.task-body {
+  display: grid; grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 16px; align-items: start; margin-top: 14px;
+}
+.task-chat { min-width: 0; }
+.task-chat .chat-panel { height: min(76vh, 820px); }
+.task-side { min-width: 0; display: flex; flex-direction: column; gap: 0; }
+.task-side .next-strip { margin: 0 0 10px; }
+.task-side .next-strip .ns-text { font-size: 12.5px; }
+.task-side .tabs {
+  margin: 0 0 10px; border-bottom: none;
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
+}
+.task-side .tabs button {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
+  justify-content: center; padding: 7px 8px; font-size: 12.5px; background: var(--panel);
+}
+.task-side .tabs button.active { border-color: var(--accent); background: var(--accent-soft); }
+.task-side .col, .task-side .plan-docs, .task-side .runs-panel, .task-side .review-panel { min-width: 0; }
+@media (max-width: 1100px) {
+  .task-body { grid-template-columns: 1fr; }
+}
+
 /* ---------- chat con el agente ---------- */
 .chat-panel {
   display: flex; flex-direction: column; gap: 10px;

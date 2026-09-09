@@ -1512,7 +1512,7 @@ function TaskView(props: {
   const planned = task.tickets.length > 0 && !!task.specCurrent;
   const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
   const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
-  const [tab, setTab] = useState<"docs" | "chat" | "changes" | "runs" | "review">(
+  const [tab, setTab] = useState<"docs" | "changes" | "runs" | "review">(
     stage >= 4 ? "runs" : stage >= 3 ? "changes" : "docs",
   );
   const tabRef = useRef(tab);
@@ -1702,85 +1702,10 @@ function TaskView(props: {
       )}
 
       <Stepper stage={stage} onGo={(s) => {
-        setTab(s <= 2 ? "docs" : s === 3 ? "changes" : s === 4 ? "runs" : "runs");
+        setTab(s <= 2 ? "docs" : s === 3 ? "changes" : "runs");
         if (s === 1) document.querySelector<HTMLInputElement>(".new-task-inline")?.focus();
         if (s >= 3) document.querySelector<HTMLElement>(".approval-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }} />
-
-      {nextStep && (
-        <div className="next-strip">
-          <span className="ns-arrow" aria-hidden="true">→</span>
-          <span className="ns-text">{nextStep.text}</span>
-          <button className="ghost" onClick={() => setTab(nextStep.tab)}>{nextStep.label}</button>
-        </div>
-      )}
-
-      <div className="tabs" role="tablist">
-        <button role="tab" aria-selected={tab === "docs"} className={tab === "docs" ? "active" : ""} onClick={() => setTab("docs")}>
-          📄 Documentos
-          {docsDone > 0 && <span className="tab-badge">{docsDone}/4</span>}
-        </button>
-        <button role="tab" aria-selected={tab === "chat"} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
-          💬 Chat
-          {(task.chatMessages?.length ?? 0) > 0 && <span className="tab-badge">{task.chatMessages!.length}</span>}
-        </button>
-        <button role="tab" aria-selected={tab === "changes"} className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
-          ✅ Cambios
-          {task.tickets.length > 0 && (
-            <span className="tab-badge">{awaitingApproval > 0 ? `${awaitingApproval} por aprobar` : `${doneTickets.length}/${task.tickets.length}`}</span>
-          )}
-        </button>
-        <button role="tab" aria-selected={tab === "runs"} className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>
-          ⚙️ Ejecuciones
-          {runningRuns > 0 ? (
-            <span className="tab-badge live">{runningRuns} activa{runningRuns === 1 ? "" : "s"}</span>
-          ) : pendingDecision > 0 ? (
-            <span className="tab-badge warn">{pendingDecision} por decidir</span>
-          ) : null}
-        </button>
-        <button role="tab" aria-selected={tab === "review"} className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>
-          🔍 Revisión
-          {openComments.length > 0 && <span className="tab-badge warn">{openComments.length}</span>}
-        </button>
-      </div>
-
-      {tab === "docs" && (
-        <PlanArtifactsSection
-          task={task}
-          selectedAgent={props.selectedAgent}
-          busy={props.runs.some((r) => r.status === "running")}
-          techMode={props.techMode}
-          openConfirm={props.openConfirm}
-          setError={props.setError}
-          updateCurrent={props.updateCurrent}
-        />
-      )}
-
-      {tab === "chat" && (
-        <ChatPanel
-          task={task}
-          selectedAgent={props.selectedAgent}
-          agents={props.agents}
-          busy={props.runs.some((r) => r.status === "running")}
-          techMode={props.techMode}
-          setSelectedAgent={props.setSelectedAgent}
-          setError={props.setError}
-          updateCurrent={props.updateCurrent}
-          refreshRuns={props.refreshRuns}
-        />
-      )}
-
-      {tab === "changes" && <div className="approval-anchor" />}
-      {tab === "changes" && !props.techMode && stage < 5 && (stage === 3 || stage === 4) && (
-        <ApprovalHero
-          count={approvedPending.length}
-          total={task.tickets.length}
-          tickets={task.tickets}
-          onApprove={(tk) => saveTicket({ ...tk, approved: !tk.approved })}
-          onRun={runExec}
-          busy={props.runs.some((r) => r.status === "running")}
-        />
-      )}
 
       {props.techMode && (
         <div className="toolbar">
@@ -1836,6 +1761,78 @@ function TaskView(props: {
             ⚡ YOLO
           </label>
         </div>
+      )}
+
+      <div className="task-body">
+        <main className="task-chat">
+          <ChatPanel
+            task={task}
+            selectedAgent={props.selectedAgent}
+            agents={props.agents}
+            busy={props.runs.some((r) => r.status === "running")}
+            techMode={props.techMode}
+            setSelectedAgent={props.setSelectedAgent}
+            setError={props.setError}
+            updateCurrent={props.updateCurrent}
+            refreshRuns={props.refreshRuns}
+          />
+        </main>
+        <aside className="task-side">
+      {nextStep && (
+        <div className="next-strip">
+          <span className="ns-arrow" aria-hidden="true">→</span>
+          <span className="ns-text">{nextStep.text}</span>
+          <button className="ghost" onClick={() => setTab(nextStep.tab)}>{nextStep.label}</button>
+        </div>
+      )}
+
+      <div className="tabs sidebar-tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "docs"} className={tab === "docs" ? "active" : ""} onClick={() => setTab("docs")}>
+          📄 Documentos
+          {docsDone > 0 && <span className="tab-badge">{docsDone}/4</span>}
+        </button>
+        <button role="tab" aria-selected={tab === "changes"} className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
+          ✅ Cambios
+          {task.tickets.length > 0 && (
+            <span className="tab-badge">{awaitingApproval > 0 ? `${awaitingApproval} por aprobar` : `${doneTickets.length}/${task.tickets.length}`}</span>
+          )}
+        </button>
+        <button role="tab" aria-selected={tab === "runs"} className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>
+          ⚙️ Ejecuciones
+          {runningRuns > 0 ? (
+            <span className="tab-badge live">{runningRuns} activa{runningRuns === 1 ? "" : "s"}</span>
+          ) : pendingDecision > 0 ? (
+            <span className="tab-badge warn">{pendingDecision} por decidir</span>
+          ) : null}
+        </button>
+        <button role="tab" aria-selected={tab === "review"} className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>
+          🔍 Revisión
+          {openComments.length > 0 && <span className="tab-badge warn">{openComments.length}</span>}
+        </button>
+      </div>
+
+      {tab === "docs" && (
+        <PlanArtifactsSection
+          task={task}
+          selectedAgent={props.selectedAgent}
+          busy={props.runs.some((r) => r.status === "running")}
+          techMode={props.techMode}
+          openConfirm={props.openConfirm}
+          setError={props.setError}
+          updateCurrent={props.updateCurrent}
+        />
+      )}
+
+      {tab === "changes" && <div className="approval-anchor" />}
+      {tab === "changes" && !props.techMode && stage < 5 && (stage === 3 || stage === 4) && (
+        <ApprovalHero
+          count={approvedPending.length}
+          total={task.tickets.length}
+          tickets={task.tickets}
+          onApprove={(tk) => saveTicket({ ...tk, approved: !tk.approved })}
+          onRun={runExec}
+          busy={props.runs.some((r) => r.status === "running")}
+        />
       )}
 
       {tab === "changes" && (
@@ -1982,6 +1979,8 @@ function TaskView(props: {
           setError={props.setError}
         />
       )}
+        </aside>
+      </div>
     </div>
   );
 }
