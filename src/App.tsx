@@ -1512,18 +1512,16 @@ function TaskView(props: {
   const planned = task.tickets.length > 0 && !!task.specCurrent;
   const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
   const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
-  const [tab, setTab] = useState<"docs" | "changes" | "runs" | "review">(
-    stage >= 4 ? "runs" : stage >= 3 ? "changes" : "docs",
-  );
+  const [tab, setTab] = useState<"docs" | "chat" | "changes" | "runs" | "review">("chat");
   const tabRef = useRef(tab);
   tabRef.current = tab;
-  // la vista sigue al usuario: run activo → Ejecuciones; comentarios abiertos → Revisión
+  // la vista sigue al usuario sin sacarlo del chat: run activo → Ejecuciones; comentarios abiertos → Revisión
   useEffect(() => {
-    if (props.runs.some((r) => r.status === "running") && tabRef.current !== "runs") setTab("runs");
+    if (props.runs.some((r) => r.status === "running") && tabRef.current !== "runs" && tabRef.current !== "chat") setTab("runs");
   }, [props.runs]);
   useEffect(() => {
     const open = (task.reviewComments ?? []).filter((c) => !c.resolved);
-    if (open.length > 0 && tabRef.current !== "review" && props.runs.every((r) => r.status !== "running")) {
+    if (open.length > 0 && tabRef.current !== "review" && tabRef.current !== "chat" && props.runs.every((r) => r.status !== "running")) {
       setTab("review");
     }
   }, [task.reviewComments, props.runs]);
@@ -1534,7 +1532,7 @@ function TaskView(props: {
   const comments = task.reviewComments ?? [];
   const openComments = comments.filter((c) => !c.resolved);
 
-  const nextStep: { text: string; label: string; tab: "docs" | "changes" | "runs" | "review" } | null = (() => {
+  const nextStep: { text: string; label: string; tab: "docs" | "changes" | "runs" | "review" | "chat" } | null = (() => {
     if (runningRuns > 0) {
       return { text: "El agente está construyendo los cambios aprobados…", label: "Ver progreso", tab: "runs" };
     }
@@ -1771,6 +1769,8 @@ function TaskView(props: {
             agents={props.agents}
             busy={props.runs.some((r) => r.status === "running")}
             techMode={props.techMode}
+            runs={props.runs}
+            onGoTab={setTab}
             setSelectedAgent={props.setSelectedAgent}
             setError={props.setError}
             updateCurrent={props.updateCurrent}
@@ -1787,6 +1787,10 @@ function TaskView(props: {
       )}
 
       <div className="tabs sidebar-tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "chat"} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
+          💬 Chat
+          {runningRuns > 0 && <span className="tab-badge live">{runningRuns} activa{runningRuns === 1 ? "" : "s"}</span>}
+        </button>
         <button role="tab" aria-selected={tab === "docs"} className={tab === "docs" ? "active" : ""} onClick={() => setTab("docs")}>
           📄 Documentos
           {docsDone > 0 && <span className="tab-badge">{docsDone}/4</span>}
@@ -1810,6 +1814,29 @@ function TaskView(props: {
           {openComments.length > 0 && <span className="tab-badge warn">{openComments.length}</span>}
         </button>
       </div>
+
+      {tab === "chat" && (
+        <section className="col chat-activity">
+          <h2>Actividad</h2>
+          {runningRuns > 0 && props.runs.filter((r) => r.status === "running").map((r) => (
+            <div key={r.id} className="chat-act-card running" onClick={() => setTab("runs")}>
+              <StatusDot status="running" map={RUN_STATUS} />
+              <span className="small flex1">{agentLabel(r.agent)} · {runKindLabel(r.mode, props.techMode)}</span>
+              <span className="chev">▸</span>
+            </div>
+          ))}
+          {pendingDecision > 0 && (
+            <div className="chat-act-card pending" onClick={() => setTab("runs")}>
+              <span className="chat-act-count">{pendingDecision}</span>
+              <span className="small flex1">cambios listos en copia aislada: revísalos y decide si aplicarlos</span>
+              <span className="chev">▸</span>
+            </div>
+          )}
+          {runningRuns === 0 && pendingDecision === 0 && (
+            <div className="empty-card">Todo tranquilo: sin ejecuciones activas ni cambios por decidir.</div>
+          )}
+        </section>
+      )}
 
       {tab === "docs" && (
         <PlanArtifactsSection
@@ -1993,6 +2020,8 @@ function ChatPanel(props: {
   agents: { id: string; label: string }[];
   busy: boolean;
   techMode: boolean;
+  runs: Run[];
+  onGoTab: (t: "docs" | "chat" | "changes" | "runs" | "review") => void;
   setSelectedAgent: (id: string) => void;
   setError: (e: string) => void;
   updateCurrent: (t: Task) => void;
@@ -2002,6 +2031,7 @@ function ChatPanel(props: {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const chatTab = props.onGoTab;
   useEffect(() => {
     endRef.current?.scrollTo(0, endRef.current.scrollHeight);
   }, [msgs.length, sending]);
@@ -2027,21 +2057,17 @@ function ChatPanel(props: {
       .catch((e) => props.setError(String(e)));
   };
 
+  const running = props.runs.filter((r) => r.status === "running");
+  const decisions = props.runs.filter((r) => r.worktreePath && r.status === "done");
+  const openComments = (props.task.reviewComments ?? []).filter((c) => !c.resolved);
+
   return (
     <div className="chat-panel">
       <div className="chat-head">
-        <select
-          value={props.selectedAgent}
-          onChange={(e) => props.setSelectedAgent(e.target.value)}
-          className="chat-agent"
-        >
-          {props.agents.map((a) => (
-            <option key={a.id} value={a.id}>{a.label}</option>
-          ))}
-        </select>
-        <span className="small dim">El agente solo lee tu proyecto en este chat; para construir, aprueba en Cambios.</span>
+        <span className="chat-title">💬 Conversación con el agente</span>
+        <span className="small dim chat-hint">Solo lee tu proyecto; para construir, aprueba los cambios.</span>
         {msgs.length > 0 && (
-          <button className="ghost" onClick={clear} title="Borrar la conversación">🗑 Limpiar</button>
+          <button className="ghost" onClick={clear} title="Borrar la conversación">🗑</button>
         )}
       </div>
       <div className="chat-log" ref={endRef}>
@@ -2063,6 +2089,32 @@ function ChatPanel(props: {
             <div className="chat-bubble typing">
               <span /><span /><span />
             </div>
+          </div>
+        )}
+      </div>
+      <div className="chat-activity-strip">
+        {running.map((r) => (
+          <div key={r.id} className="cas-card running" onClick={() => chatTab("runs")}>
+            <span className="cas-icon" aria-hidden="true">⏳</span>
+            <span className="cas-text"><strong>Construyendo…</strong> {agentLabel(r.agent)} está {runKindLabel(r.mode, props.techMode)}</span>
+            <button className="ghost">Ver</button>
+          </div>
+        ))}
+        {decisions.length > 0 && (
+          <div className="cas-card decision">
+            <span className="cas-icon" aria-hidden="true">📦</span>
+            <span className="cas-text">
+              <strong>{decisions.length} cambio{decisions.length === 1 ? "" : "s"} listo{decisions.length === 1 ? "" : "s"}</strong> en copia aislada
+              <span className="cas-files mono">{decisions.map((r) => r.summary ?? "").filter(Boolean).join(" · ").slice(0, 60)}</span>
+            </span>
+            <button className="ghost" onClick={() => chatTab("runs")}>Revisar</button>
+          </div>
+        )}
+        {openComments.length > 0 && (
+          <div className="cas-card review" onClick={() => chatTab("review")}>
+            <span className="cas-icon" aria-hidden="true">🔍</span>
+            <span className="cas-text"><strong>Revisión</strong> · {openComments.length} punto{openComments.length === 1 ? "" : "s"} a mejorar</span>
+            <button className="ghost">Ver</button>
           </div>
         )}
       </div>
