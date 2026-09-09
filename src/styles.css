@@ -509,6 +509,43 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 }
 .chat-compose textarea:focus { outline: none; border-color: var(--accent); }
 .chat-compose button { flex: none; }
+.chat-compose-row { display: flex; gap: 8px; align-items: center; }
+.chat-compose-row .chat-agent { width: auto; min-width: 150px; max-width: 220px; font-size: 12px; padding: 6px 8px; background: var(--panel2); border: 1px solid var(--border-soft); border-radius: var(--radius-lg); color: var(--text); }
+.chat-compose-row .primary { flex: none; }
+
+/* ---------- tarjetas intercaladas en el timeline del chat (patrón Traycer) ---------- */
+.chat-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--radius-lg);
+  border: 1px solid var(--border-soft); background: var(--panel2);
+  cursor: pointer; font-size: 13px; max-width: 92%;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+  animation: popIn 0.16s ease;
+}
+.chat-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.chat-card-icon { font-size: 17px; flex: none; }
+.chat-card-icon.spin { animation: pulse 1.6s infinite; }
+.chat-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; line-height: 1.35; }
+.chat-card-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-card-action { flex: none; font-size: 12px; color: var(--accent); font-weight: 600; cursor: pointer; }
+.chat-card-actions { flex: none; display: flex; gap: 6px; }
+.chat-card-actions .ghost, .chat-card-actions .primary { padding: 5px 12px; font-size: 12px; }
+.chat-card.doc { border-left: 3px solid var(--blue); }
+.chat-card.plan { border-left: 3px solid var(--accent); }
+.chat-card.review { border-left: 3px solid var(--warn); }
+.chat-card.decision { border-left: 3px solid var(--ok); }
+.chat-card.running { border-left: 3px solid var(--ok); animation: pulse 1.8s infinite; }
+
+/* ---------- barra de estado del chat (estilo Traycer) ---------- */
+.chat-status {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  padding: 4px 2px 0; flex-wrap: wrap;
+}
+.cs-pill {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border-soft); color: var(--muted);
+}
+.cs-pill.cs-right { margin-left: auto; color: var(--text-dim); }
 
 /* ---------- artefactos de planificación (brief/arquitectura/flujos/spec) ---------- */
 .plan-docs { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 18px; }

@@ -1775,6 +1775,7 @@ function TaskView(props: {
             setError={props.setError}
             updateCurrent={props.updateCurrent}
             refreshRuns={props.refreshRuns}
+            openConfirm={props.openConfirm}
           />
         </main>
         <aside className="task-side">
@@ -2026,6 +2027,7 @@ function ChatPanel(props: {
   setError: (e: string) => void;
   updateCurrent: (t: Task) => void;
   refreshRuns: () => Promise<void>;
+  openConfirm: (spec: ConfirmSpec) => void;
 }) {
   const msgs = props.task.chatMessages ?? [];
   const [draft, setDraft] = useState("");
@@ -2060,6 +2062,135 @@ function ChatPanel(props: {
   const running = props.runs.filter((r) => r.status === "running");
   const decisions = props.runs.filter((r) => r.worktreePath && r.status === "done");
   const openComments = (props.task.reviewComments ?? []).filter((c) => !c.resolved);
+  const worktreeId = (r: Run) => r.worktreePath?.split(/[\\/]/).pop() ?? "";
+  const lastDoc = (props.task.planArtifacts ?? []).slice(-1)[0] ?? null;
+  const lastDocIdx = msgs.length; // documentos y plan aparecen como tarjetas al final del hilo
+  const planned = props.task.tickets.length > 0 && !!props.task.specCurrent;
+  void lastDocIdx;
+
+  const applyRun = (r: Run) => {
+    props.openConfirm({
+      title: "Aplicar los cambios",
+      message: "Se aplicará lo construido sobre tu proyecto actual y se limpiará la copia aislada.",
+      confirmLabel: "Aplicar cambios",
+      onConfirm: async () => {
+        try {
+          await invoke("merge_worktree", { id: worktreeId(r) });
+          await props.refreshRuns();
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
+  };
+  const discardRun = (r: Run) => {
+    props.openConfirm({
+      title: "Descartar los cambios",
+      message: "Se borrará la copia aislada donde se trabajó. Los cambios no aplicados se pierden.",
+      confirmLabel: "Descartar",
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await invoke("discard_worktree", { id: worktreeId(r) });
+          await props.refreshRuns();
+        } catch (e) {
+          props.setError(String(e));
+        }
+      },
+    });
+  };
+
+  // timeline: mensajes del chat + tarjetas de artefactos/plan/verificación/cambios intercaladas
+  const timeline: { key: string; el: ReactNode }[] = msgs.map((m, i) => ({
+    key: `m${i}`,
+    el: (
+      <div className={`chat-msg ${m.role}`}>
+        <div className="chat-bubble">
+          <div className="chat-text">{m.text}</div>
+          <div className="chat-time">{fmtTime(m.createdAt)}</div>
+        </div>
+      </div>
+    ),
+  }));
+  if (lastDoc) {
+    const meta = ({ brief: { label: "Brief", icon: "🎯" }, architecture: { label: "Arquitectura", icon: "🏗" }, flows: { label: "Flujos", icon: "🔀" }, spec: { label: "Spec", icon: "📄" } } as Record<string, { label: string; icon: string }>)[lastDoc.kind] ?? { label: lastDoc.kind, icon: "📄" };
+    timeline.push({
+      key: `doc-${lastDoc.kind}`,
+      el: (
+        <div className="chat-card doc" onClick={() => chatTab("docs")}>
+          <span className="chat-card-icon" aria-hidden="true">{meta.icon}</span>
+          <span className="chat-card-body">
+            <strong>{meta.label}</strong>
+            <span className="chat-card-sub">{lastDoc.content.split("\n").length} líneas · {fmtTime(lastDoc.createdAt)}</span>
+          </span>
+          <span className="chat-card-action"><button className="ghost">📄 Leer</button></span>
+        </div>
+      ),
+    });
+  }
+  if (planned) {
+    timeline.push({
+      key: "plan",
+      el: (
+        <div className="chat-card plan" onClick={() => chatTab("changes")}>
+          <span className="chat-card-icon" aria-hidden="true">🧠</span>
+          <span className="chat-card-body">
+            <strong>Plan generado · {props.task.tickets.length} tickets</strong>
+            <span className="chat-card-sub">revísalos y aprueba los que quieras construir</span>
+          </span>
+          <span className="chat-card-action"><button className="ghost">Ver tickets</button></span>
+        </div>
+      ),
+    });
+  }
+  if (openComments.length > 0) {
+    timeline.push({
+      key: "review",
+      el: (
+        <div className="chat-card review" onClick={() => chatTab("review")}>
+          <span className="chat-card-icon" aria-hidden="true">🔍</span>
+          <span className="chat-card-body">
+            <strong>Verificación</strong>
+            <span className="chat-card-sub">{openComments.length} punto{openComments.length === 1 ? "" : "s"} a mejorar</span>
+          </span>
+          <span className="chat-card-action"><button className="ghost">Ver</button></span>
+        </div>
+      ),
+    });
+  }
+  for (const r of decisions) {
+    timeline.push({
+      key: `run-${r.id}`,
+      el: (
+        <div className="chat-card decision">
+          <span className="chat-card-icon" aria-hidden="true">📦</span>
+          <span className="chat-card-body">
+            <strong>Cambios listos{r.summary ? ` · ${r.summary.slice(0, 44)}` : ""}</strong>
+            <span className="chat-card-sub mono">{worktreeId(r)}</span>
+          </span>
+          <span className="chat-card-actions">
+            <button className="ghost" onClick={(e) => { e.stopPropagation(); discardRun(r); }}>Descartar</button>
+            <button className="primary" onClick={(e) => { e.stopPropagation(); applyRun(r); }}>Aplicar</button>
+          </span>
+        </div>
+      ),
+    });
+  }
+  for (const r of running) {
+    timeline.push({
+      key: `run-${r.id}`,
+      el: (
+        <div className="chat-card running" onClick={() => chatTab("runs")}>
+          <span className="chat-card-icon spin" aria-hidden="true">⏳</span>
+          <span className="chat-card-body">
+            <strong>Construyendo…</strong>
+            <span className="chat-card-sub">{agentLabel(r.agent)} · {runKindLabel(r.mode, props.techMode)}</span>
+          </span>
+          <span className="chat-card-action"><button className="ghost">Ver</button></span>
+        </div>
+      ),
+    });
+  }
 
   return (
     <div className="chat-panel">
@@ -2071,19 +2202,12 @@ function ChatPanel(props: {
         )}
       </div>
       <div className="chat-log" ref={endRef}>
-        {msgs.length === 0 && (
+        {timeline.length === 0 && (
           <div className="chat-empty">
             Conversa con el agente: pregúntale por el plan, pide alternativas o aclara qué quieres construir. Nada se modifica hasta que apruebes cambios.
           </div>
         )}
-        {msgs.map((m, i) => (
-          <div key={i} className={`chat-msg ${m.role}`}>
-            <div className="chat-bubble">
-              <div className="chat-text">{m.text}</div>
-              <div className="chat-time">{fmtTime(m.createdAt)}</div>
-            </div>
-          </div>
-        ))}
+        {timeline.map((item) => <div key={item.key}>{item.el}</div>)}
         {sending && (
           <div className="chat-msg agent">
             <div className="chat-bubble typing">
@@ -2092,36 +2216,10 @@ function ChatPanel(props: {
           </div>
         )}
       </div>
-      <div className="chat-activity-strip">
-        {running.map((r) => (
-          <div key={r.id} className="cas-card running" onClick={() => chatTab("runs")}>
-            <span className="cas-icon" aria-hidden="true">⏳</span>
-            <span className="cas-text"><strong>Construyendo…</strong> {agentLabel(r.agent)} está {runKindLabel(r.mode, props.techMode)}</span>
-            <button className="ghost">Ver</button>
-          </div>
-        ))}
-        {decisions.length > 0 && (
-          <div className="cas-card decision">
-            <span className="cas-icon" aria-hidden="true">📦</span>
-            <span className="cas-text">
-              <strong>{decisions.length} cambio{decisions.length === 1 ? "" : "s"} listo{decisions.length === 1 ? "" : "s"}</strong> en copia aislada
-              <span className="cas-files mono">{decisions.map((r) => r.summary ?? "").filter(Boolean).join(" · ").slice(0, 60)}</span>
-            </span>
-            <button className="ghost" onClick={() => chatTab("runs")}>Revisar</button>
-          </div>
-        )}
-        {openComments.length > 0 && (
-          <div className="cas-card review" onClick={() => chatTab("review")}>
-            <span className="cas-icon" aria-hidden="true">🔍</span>
-            <span className="cas-text"><strong>Revisión</strong> · {openComments.length} punto{openComments.length === 1 ? "" : "s"} a mejorar</span>
-            <button className="ghost">Ver</button>
-          </div>
-        )}
-      </div>
       <div className="chat-compose">
         <textarea
           value={draft}
-          placeholder="Escríbele al agente… (Enter para enviar)"
+          placeholder="Pídele lo que quieras construir o pregúntale por el plan… (Enter para enviar)"
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -2131,14 +2229,32 @@ function ChatPanel(props: {
           }}
           rows={2}
         />
-        <button
-          className="primary"
-          onClick={send}
-          disabled={!draft.trim() || sending || props.busy}
-          title={props.busy ? "Espera a que termine la ejecución en curso" : ""}
-        >
-          Enviar
-        </button>
+        <div className="chat-compose-row">
+          <select
+            value={props.selectedAgent}
+            onChange={(e) => props.setSelectedAgent(e.target.value)}
+            className="chat-agent"
+            title="Agente que responde en el chat"
+          >
+            {props.agents.map((a) => (
+              <option key={a.id} value={a.id}>{a.label}</option>
+            ))}
+          </select>
+          <button
+            className="primary"
+            onClick={send}
+            disabled={!draft.trim() || sending || props.busy}
+            title={props.busy ? "Espera a que termine la ejecución en curso" : ""}
+          >
+            Enviar
+          </button>
+        </div>
+      </div>
+      <div className="chat-status">
+        <span className="cs-pill">{agentLabel(props.selectedAgent)}</span>
+        <span className="cs-pill">{props.techMode ? "Modo técnico" : "Modo simple"}</span>
+        <span className="cs-pill">{props.task.tickets.filter((t) => t.status === "done").length}/{props.task.tickets.length} hechos</span>
+        <span className="cs-pill cs-right">{running.length > 0 ? `${running.length} ejecución${running.length === 1 ? "" : "es"} activa${running.length === 1 ? "" : "s"}` : props.busy ? "ocupado" : "listo"}</span>
       </div>
     </div>
   );
