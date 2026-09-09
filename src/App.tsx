@@ -1504,8 +1504,62 @@ function TaskView(props: {
   const planned = task.tickets.length > 0 && !!task.specCurrent;
   const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
   const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
+  const [tab, setTab] = useState<"docs" | "changes" | "runs" | "review">(
+    stage >= 4 ? "runs" : stage >= 3 ? "changes" : "docs",
+  );
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  // la vista sigue al usuario: run activo → Ejecuciones; comentarios abiertos → Revisión
+  useEffect(() => {
+    if (props.runs.some((r) => r.status === "running") && tabRef.current !== "runs") setTab("runs");
+  }, [props.runs]);
+  useEffect(() => {
+    const open = (task.reviewComments ?? []).filter((c) => !c.resolved);
+    if (open.length > 0 && tabRef.current !== "review" && props.runs.every((r) => r.status !== "running")) {
+      setTab("review");
+    }
+  }, [task.reviewComments, props.runs]);
+  const docsDone = (task.planArtifacts ?? []).length;
+  const awaitingApproval = task.tickets.filter((t) => !t.approved && t.status !== "done").length;
+  const runningRuns = props.runs.filter((r) => r.status === "running").length;
+  const pendingDecision = props.runs.filter((r) => r.worktreePath && r.status === "done").length;
   const comments = task.reviewComments ?? [];
   const openComments = comments.filter((c) => !c.resolved);
+
+  const nextStep: { text: string; label: string; tab: "docs" | "changes" | "runs" | "review" } | null = (() => {
+    if (runningRuns > 0) {
+      return { text: "El agente está construyendo los cambios aprobados…", label: "Ver progreso", tab: "runs" };
+    }
+    if (task.tickets.length === 0 && docsDone < 4) {
+      return {
+        text: docsDone === 0
+          ? "Empieza generando los documentos del plan (el agente puede preguntarte antes de escribir cada uno)."
+          : `Van ${docsDone} de 4 documentos. Genera el siguiente para avanzar.`,
+        label: "Continuar con los documentos",
+        tab: "docs",
+      };
+    }
+    if (task.tickets.length > 0 && awaitingApproval > 0) {
+      return {
+        text: awaitingApproval === task.tickets.length
+          ? "El plan está listo: revisa los cambios propuestos y aprueba los que quieras construir."
+          : `Quedan ${awaitingApproval} cambios por aprobar.`,
+        label: "Ir a Cambios",
+        tab: "changes",
+      };
+    }
+    if (pendingDecision > 0) {
+      return {
+        text: "Hay ejecuciones terminadas con cambios aún sin decidir (aplicar o descartar).",
+        label: "Ir a Ejecuciones",
+        tab: "runs",
+      };
+    }
+    if (openComments.length > 0) {
+      return { text: "La verificación encontró puntos a mejorar.", label: "Ir a Revisión", tab: "review" };
+    }
+    return null;
+  })();
   const resolvedComments = comments.filter((c) => c.resolved);
   const lastExecDone = [...props.runs].reverse().find((r) => r.mode !== "plan" && r.status === "done");
   // resume disponible si el agente elegido ya corrió con éxito en esta task
@@ -1640,25 +1694,58 @@ function TaskView(props: {
       )}
 
       <Stepper stage={stage} onGo={(s) => {
+        setTab(s <= 2 ? "docs" : s === 3 ? "changes" : s === 4 ? "runs" : "runs");
         if (s === 1) document.querySelector<HTMLInputElement>(".new-task-inline")?.focus();
-        if (s === 2) document.querySelector<HTMLElement>(".plan-docs")?.scrollIntoView({ behavior: "smooth", block: "start" });
         if (s >= 3) document.querySelector<HTMLElement>(".approval-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }} />
 
-      <PlanArtifactsSection
-        task={task}
-        selectedAgent={props.selectedAgent}
-        busy={props.runs.some((r) => r.status === "running")}
-        techMode={props.techMode}
-        openConfirm={props.openConfirm}
-        setError={props.setError}
-        updateCurrent={props.updateCurrent}
-      />
-
-      {stage < 5 && !props.techMode && (
-        <div className="approval-anchor" />
+      {nextStep && (
+        <div className="next-strip">
+          <span className="ns-arrow" aria-hidden="true">→</span>
+          <span className="ns-text">{nextStep.text}</span>
+          <button className="ghost" onClick={() => setTab(nextStep.tab)}>{nextStep.label}</button>
+        </div>
       )}
-      {!props.techMode && stage < 5 && (stage === 3 || stage === 4) && (
+
+      <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "docs"} className={tab === "docs" ? "active" : ""} onClick={() => setTab("docs")}>
+          📄 Documentos
+          {docsDone > 0 && <span className="tab-badge">{docsDone}/4</span>}
+        </button>
+        <button role="tab" aria-selected={tab === "changes"} className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
+          ✅ Cambios
+          {task.tickets.length > 0 && (
+            <span className="tab-badge">{awaitingApproval > 0 ? `${awaitingApproval} por aprobar` : `${doneTickets.length}/${task.tickets.length}`}</span>
+          )}
+        </button>
+        <button role="tab" aria-selected={tab === "runs"} className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>
+          ⚙️ Ejecuciones
+          {runningRuns > 0 ? (
+            <span className="tab-badge live">{runningRuns} activa{runningRuns === 1 ? "" : "s"}</span>
+          ) : pendingDecision > 0 ? (
+            <span className="tab-badge warn">{pendingDecision} por decidir</span>
+          ) : null}
+        </button>
+        <button role="tab" aria-selected={tab === "review"} className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>
+          🔍 Revisión
+          {openComments.length > 0 && <span className="tab-badge warn">{openComments.length}</span>}
+        </button>
+      </div>
+
+      {tab === "docs" && (
+        <PlanArtifactsSection
+          task={task}
+          selectedAgent={props.selectedAgent}
+          busy={props.runs.some((r) => r.status === "running")}
+          techMode={props.techMode}
+          openConfirm={props.openConfirm}
+          setError={props.setError}
+          updateCurrent={props.updateCurrent}
+        />
+      )}
+
+      {tab === "changes" && <div className="approval-anchor" />}
+      {tab === "changes" && !props.techMode && stage < 5 && (stage === 3 || stage === 4) && (
         <ApprovalHero
           count={approvedPending.length}
           total={task.tickets.length}
@@ -1725,7 +1812,7 @@ function TaskView(props: {
         </div>
       )}
 
-      <div className="cols">
+      {tab === "changes" && (
         <section className="col">
           <h2>Tickets ({task.tickets.length})</h2>
           <div className="tickets">
@@ -1801,7 +1888,9 @@ function TaskView(props: {
           </div>
           <button className="block" onClick={addTicket}>+ Añadir ticket</button>
         </section>
+      )}
 
+      {tab === "review" && (
         <section className="col">
           <h2>Revisión {comments.length > 0 && `(${openComments.length} abiertos)`}</h2>
           {comments.length === 0 ? (
@@ -1850,22 +1939,23 @@ function TaskView(props: {
               </button>
             )}
           </div>
-
-          <h2>Ejecuciones</h2>
-          <RunsPanel
-            task={task}
-            runs={props.runs}
-            currentRun={props.currentRun}
-            events={props.events}
-            techMode={props.techMode}
-            openDetail={(id) => setDetail({ type: "run", id })}
-            openDetailRunId={detail?.type === "run" ? detail.id : null}
-            refreshRuns={props.refreshRuns}
-            openConfirm={props.openConfirm}
-            setError={props.setError}
-          />
         </section>
-      </div>
+      )}
+
+      {tab === "runs" && (
+        <RunsPanel
+          task={task}
+          runs={props.runs}
+          currentRun={props.currentRun}
+          events={props.events}
+          techMode={props.techMode}
+          openDetail={(id) => setDetail({ type: "run", id })}
+          openDetailRunId={detail?.type === "run" ? detail.id : null}
+          refreshRuns={props.refreshRuns}
+          openConfirm={props.openConfirm}
+          setError={props.setError}
+        />
+      )}
     </div>
   );
 }

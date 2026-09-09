@@ -387,6 +387,30 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 }
 .artifact-body.md hr { border: none; border-top: 1px solid var(--border-soft); margin: 12px 0; }
 
+/* ---------- tabs del flujo SDD ---------- */
+.tabs { display: flex; gap: 6px; margin: 14px 0 12px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+.tabs button {
+  background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 8px 12px 10px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 7px;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab-badge {
+  font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.tab-badge.warn { background: var(--warn-soft); color: var(--warn); }
+.tab-badge.live { background: var(--ok-soft); color: var(--ok); animation: pulse 1.6s infinite; }
+.next-strip {
+  display: flex; align-items: center; gap: 10px; margin: 10px 0;
+  padding: 10px 14px; border: 1px solid var(--accent-soft); border-radius: var(--radius-lg);
+  background: var(--accent-soft); color: var(--text); font-size: 13px;
+}
+.next-strip .ns-arrow { color: var(--accent); font-weight: 700; }
+.next-strip .ns-text { flex: 1; }
+.next-strip button { flex: none; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
 /* ---------- artefactos de planificación (brief/arquitectura/flujos/spec) ---------- */
 .plan-docs { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 18px; }
 .plan-docs-progress { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
