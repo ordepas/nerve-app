@@ -87,6 +87,17 @@ pub fn questions_output(kind: &str) -> String {
     json!({ "questions": list }).to_string()
 }
 
+/// Respuesta simulada del chat (mismo contrato que el adaptador real).
+pub fn chat_output(message: &str) -> String {
+    let m = message.trim();
+    if m.is_empty() {
+        return "No recibí ningún mensaje. Escríbeme qué quieres construir o qué dudas tienes sobre el plan.".into();
+    }
+    format!(
+        "Recibido: «{m}». En modo simulado no uso ningún modelo, pero te respondo con lo esencial: los documentos del plan describen objetivo, arquitectura, flujos y criterios de aceptación. Aprueba los cambios que quieras en la pestaña Cambios y la ejecución los construye en una copia aislada; luego los aplicas o descartas desde Ejecuciones.\n\n¿Quieres que detalle alguna parte del plan?"
+    )
+}
+
 /// Ejecución simulada: escribe nerve-demo.md en el run dir y devuelve el resumen.
 pub fn exec_apply(run_dir: &Path, ticket_title: &str) -> Result<String, String> {
     let path = run_dir.join("nerve-demo.md");

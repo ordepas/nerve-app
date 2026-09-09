@@ -227,6 +227,7 @@ fn create_task(title: String, intent: String, state: State<AppState>) -> Result<
         plan_artifacts: Vec::new(),
         pending_docs: Vec::new(),
         tickets: Vec::new(),
+        chat_messages: Vec::new(),
         review_comments: Vec::new(),
     };
     state.store.save_task(&task)?;
@@ -448,7 +449,84 @@ fn answer_doc(
     Ok(t)
 }
 
-// ---------- runs ----------
+/// Envía un mensaje del usuario al agente (chat en conversación abierta).
+#[tauri::command]
+fn send_chat(
+    app: AppHandle,
+    task_id: String,
+    agent_id: String,
+    message: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    let msg = message.trim().to_string();
+    if msg.is_empty() {
+        return Err("el mensaje está vacío".into());
+    }
+    let task = state.store.load_task(&task_id)?;
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    // registra el mensaje del usuario en el historial antes de lanzar
+    let mut t = task.clone();
+    t.chat_messages.push(crate::model::ChatMessage {
+        role: "user".into(),
+        text: msg.clone(),
+        created_at: now_ms(),
+    });
+    t.updated_at = now_ms();
+    state.store.save_task(&t)?;
+    let _ = app.emit("task-updated", &t);
+
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    let ws = ws_path(&state)?;
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let run_id = new_id("run");
+    let run_id_c = run_id.clone();
+    let msg_c = msg.clone();
+    let agent_label = agent.id.clone();
+    std::thread::spawn(move || {
+        let run = runner::run_chat(app.clone(), &store, &registry, &run_id_c, &t, &agent, &ws, &msg_c);
+        let _ = app.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: run_id,
+        task_id,
+        agent: agent_label,
+        mode: "chat".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+/// Borra el historial de chat de la tarea.
+#[tauri::command]
+fn clear_chat(
+    app: AppHandle,
+    task_id: String,
+    state: State<AppState>,
+) -> Result<Task, String> {
+    let mut t = state.store.load_task(&task_id)?;
+    t.chat_messages.clear();
+    t.updated_at = now_ms();
+    state.store.save_task(&t)?;
+    let _ = app.emit("task-updated", &t);
+    Ok(t)
+}
 
 #[tauri::command]
 fn list_runs(task_id: String, state: State<AppState>) -> Result<Vec<Run>, String> {
@@ -898,6 +976,8 @@ pub fn run() {
             delete_doc,
             ask_doc,
             answer_doc,
+            send_chat,
+            clear_chat,
             list_runs,
             get_run,
             cancel_run,

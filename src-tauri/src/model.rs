@@ -94,6 +94,15 @@ pub struct AnswerInput {
     pub text: String,
 }
 
+/// Mensaje del chat con el agente (persistido en la task).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub role: String, // user | agent
+    pub text: String,
+    pub created_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -115,6 +124,9 @@ pub struct Task {
     pub pending_docs: Vec<PendingDoc>,
     #[serde(default)]
     pub tickets: Vec<Ticket>,
+    // conversación con el agente sobre esta tarea (tab Chat)
+    #[serde(default)]
+    pub chat_messages: Vec<ChatMessage>,
     // comentarios de verificación (diff vs plan), persistidos en la task
     #[serde(default)]
     pub review_comments: Vec<ReviewComment>,

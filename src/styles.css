@@ -411,6 +411,46 @@ pre.spec { max-height: 320px; color: var(--text-dim); }
 .next-strip button { flex: none; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
+/* ---------- chat con el agente ---------- */
+.chat-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
+  background: var(--panel); padding: 12px; height: min(62vh, 560px);
+}
+.chat-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-head .chat-agent { width: auto; min-width: 160px; }
+.chat-head .small.dim { flex: 1; }
+.chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
+.chat-empty {
+  margin: auto; max-width: 420px; text-align: center;
+  color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.chat-msg { display: flex; }
+.chat-msg.user { justify-content: flex-end; }
+.chat-msg.agent { justify-content: flex-start; }
+.chat-bubble {
+  max-width: 78%; padding: 8px 12px; border-radius: var(--radius-lg);
+  font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+}
+.chat-msg.user .chat-bubble { background: var(--accent-soft); color: var(--text); border-bottom-right-radius: 4px; }
+.chat-msg.agent .chat-bubble { background: var(--panel2); border: 1px solid var(--border-soft); border-bottom-left-radius: 4px; }
+.chat-time { margin-top: 4px; font-size: 10.5px; color: var(--muted); text-align: right; }
+.chat-bubble.typing { display: flex; gap: 4px; padding: 12px 14px; }
+.chat-bubble.typing span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+  animation: pulse 1.2s infinite;
+}
+.chat-bubble.typing span:nth-child(2) { animation-delay: 0.2s; }
+.chat-bubble.typing span:nth-child(3) { animation-delay: 0.4s; }
+.chat-compose { display: flex; gap: 8px; align-items: flex-end; flex: none; }
+.chat-compose textarea {
+  flex: 1; resize: none; max-height: 120px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  color: var(--text); font: inherit; font-size: 13px; padding: 9px 12px;
+}
+.chat-compose textarea:focus { outline: none; border-color: var(--accent); }
+.chat-compose button { flex: none; }
+
 /* ---------- artefactos de planificación (brief/arquitectura/flujos/spec) ---------- */
 .plan-docs { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 18px; }
 .plan-docs-progress { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -42,6 +42,12 @@ interface PendingDoc {
   createdAt: number;
 }
 
+interface ChatMessage {
+  role: string; // user | agent
+  text: string;
+  createdAt: number;
+}
+
 interface Task {
   id: string;
   title: string;
@@ -54,6 +60,7 @@ interface Task {
   planArtifacts?: PlanArtifact[];
   pendingDocs?: PendingDoc[];
   tickets: Ticket[];
+  chatMessages?: ChatMessage[];
   reviewComments?: ReviewComment[];
 }
 
@@ -249,6 +256,7 @@ function runKindLabel(mode: string, techMode: boolean) {
   if (mode === "plan") return "solo planifica";
   if (mode === "doc") return "documento (solo lee)";
   if (mode === "ask") return "preguntas (solo lee)";
+  if (mode === "chat") return "conversación (solo lee)";
   if (mode === "workspace") return "directo en tu proyecto";
   return "en copia aislada";
 }
@@ -1504,7 +1512,7 @@ function TaskView(props: {
   const planned = task.tickets.length > 0 && !!task.specCurrent;
   const allDone = task.tickets.length > 0 && doneTickets.length === task.tickets.length;
   const stage = allDone ? 5 : approvedPending.length > 0 || task.status === "in_dev" ? 4 : planned ? 3 : 1;
-  const [tab, setTab] = useState<"docs" | "changes" | "runs" | "review">(
+  const [tab, setTab] = useState<"docs" | "chat" | "changes" | "runs" | "review">(
     stage >= 4 ? "runs" : stage >= 3 ? "changes" : "docs",
   );
   const tabRef = useRef(tab);
@@ -1712,6 +1720,10 @@ function TaskView(props: {
           📄 Documentos
           {docsDone > 0 && <span className="tab-badge">{docsDone}/4</span>}
         </button>
+        <button role="tab" aria-selected={tab === "chat"} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
+          💬 Chat
+          {(task.chatMessages?.length ?? 0) > 0 && <span className="tab-badge">{task.chatMessages!.length}</span>}
+        </button>
         <button role="tab" aria-selected={tab === "changes"} className={tab === "changes" ? "active" : ""} onClick={() => setTab("changes")}>
           ✅ Cambios
           {task.tickets.length > 0 && (
@@ -1741,6 +1753,20 @@ function TaskView(props: {
           openConfirm={props.openConfirm}
           setError={props.setError}
           updateCurrent={props.updateCurrent}
+        />
+      )}
+
+      {tab === "chat" && (
+        <ChatPanel
+          task={task}
+          selectedAgent={props.selectedAgent}
+          agents={props.agents}
+          busy={props.runs.some((r) => r.status === "running")}
+          techMode={props.techMode}
+          setSelectedAgent={props.setSelectedAgent}
+          setError={props.setError}
+          updateCurrent={props.updateCurrent}
+          refreshRuns={props.refreshRuns}
         />
       )}
 
@@ -1956,6 +1982,113 @@ function TaskView(props: {
           setError={props.setError}
         />
       )}
+    </div>
+  );
+}
+
+// ---------- chat con el agente ----------
+
+function ChatPanel(props: {
+  task: Task;
+  selectedAgent: string;
+  agents: { id: string; label: string }[];
+  busy: boolean;
+  techMode: boolean;
+  setSelectedAgent: (id: string) => void;
+  setError: (e: string) => void;
+  updateCurrent: (t: Task) => void;
+  refreshRuns: () => Promise<void>;
+}) {
+  const msgs = props.task.chatMessages ?? [];
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    endRef.current?.scrollTo(0, endRef.current.scrollHeight);
+  }, [msgs.length, sending]);
+
+  const send = async () => {
+    const m = draft.trim();
+    if (!m || sending || props.busy) return;
+    setSending(true);
+    setDraft("");
+    try {
+      await invoke("send_chat", { taskId: props.task.id, agentId: props.selectedAgent, message: m });
+      await props.refreshRuns();
+    } catch (e) {
+      props.setError(String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const clear = () => {
+    invoke<Task>("clear_chat", { taskId: props.task.id })
+      .then((t) => props.updateCurrent(t))
+      .catch((e) => props.setError(String(e)));
+  };
+
+  return (
+    <div className="chat-panel">
+      <div className="chat-head">
+        <select
+          value={props.selectedAgent}
+          onChange={(e) => props.setSelectedAgent(e.target.value)}
+          className="chat-agent"
+        >
+          {props.agents.map((a) => (
+            <option key={a.id} value={a.id}>{a.label}</option>
+          ))}
+        </select>
+        <span className="small dim">El agente solo lee tu proyecto en este chat; para construir, aprueba en Cambios.</span>
+        {msgs.length > 0 && (
+          <button className="ghost" onClick={clear} title="Borrar la conversación">🗑 Limpiar</button>
+        )}
+      </div>
+      <div className="chat-log" ref={endRef}>
+        {msgs.length === 0 && (
+          <div className="chat-empty">
+            Conversa con el agente: pregúntale por el plan, pide alternativas o aclara qué quieres construir. Nada se modifica hasta que apruebes cambios.
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} className={`chat-msg ${m.role}`}>
+            <div className="chat-bubble">
+              <div className="chat-text">{m.text}</div>
+              <div className="chat-time">{fmtTime(m.createdAt)}</div>
+            </div>
+          </div>
+        ))}
+        {sending && (
+          <div className="chat-msg agent">
+            <div className="chat-bubble typing">
+              <span /><span /><span />
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="chat-compose">
+        <textarea
+          value={draft}
+          placeholder="Escríbele al agente… (Enter para enviar)"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+          rows={2}
+        />
+        <button
+          className="primary"
+          onClick={send}
+          disabled={!draft.trim() || sending || props.busy}
+          title={props.busy ? "Espera a que termine la ejecución en curso" : ""}
+        >
+          Enviar
+        </button>
+      </div>
     </div>
   );
 }

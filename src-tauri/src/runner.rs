@@ -163,6 +163,22 @@ pub fn extract_questions_block(text: &str) -> Option<Value> {
     serde_json::from_str(&candidate).ok()
 }
 
+/// Prompt del chat: conversación abierta sobre la tarea (solo lectura).
+pub fn chat_prompt(task: &Task, history: &str, message: &str) -> String {
+    let hist = if history.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nConversación previa (respeta el contexto):\n{history}")
+    };
+    format!(
+        "Eres el asistente de planificación de Nerve para esta tarea. Conversa con el usuario: responde dudas, sugiere mejoras y ayuda a decidir qué construir. NO modifiques ningún archivo (solo lectura; si propones cambios, descríbelos). Sé conciso y práctico, responde en el idioma del usuario.{hist}\n\nMensaje del usuario:\n{message}\n\nContexto de la tarea:\nIntención: {intent}\nTítulo: {title}",
+        hist = hist,
+        message = message,
+        intent = task.intent,
+        title = task.title,
+    )
+}
+
 /// Run de documento de planificación (modo "doc"): solo lectura sobre el
 /// workspace, genera UN artefacto (brief | architecture | flows) y lo guarda
 /// en la task. No genera spec ni tickets.
@@ -470,6 +486,123 @@ pub fn run_questions(
             None,
         );
         let _ = app.emit("doc-questions", json!({"taskId": task.id, "runId": run_id, "kind": kind}));
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
+
+/// Run de chat (modo "chat"): el agente responde un mensaje del usuario en
+/// conversación abierta sobre la tarea. Solo lectura; la respuesta se guarda
+/// en task.chat_messages.
+pub fn run_chat(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    ws: &Path,
+    message: &str,
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: "chat".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        let history = task
+            .chat_messages
+            .iter()
+            .map(|m| format!("- {} ({}): {}", if m.role == "user" { "usuario" } else { "agente" }, m.created_at, m.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = chat_prompt(task, &history, message);
+        emit(&app, store, &task.id, run_id, "info", Some("Pensando…".into()), None);
+
+        let text: String = if agent.kind == "mock" {
+            mock_agent::chat_output(message)
+        } else if agent.kind == "ollama" {
+            let cfg = store.load_workspace()?;
+            let (t, _) = ollama::run_read_prompt(&cfg.ollama_url, &cfg.ollama_model, &prompt, ws, |line| {
+                if cancel.cancelled() {
+                    return Err("__cancelled__".into());
+                }
+                emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                Ok(())
+            })?;
+            t
+        } else if agent.kind == "codex" {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+            let mut args: Vec<String> = agent.plan_args.clone();
+            args.push("--output-last-message".into());
+            args.push(last_msg.to_string_lossy().to_string());
+            let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                read_stream_codex(&mut child, &cancel, &last_msg)
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let _ = fs::remove_file(&last_msg);
+            let (t, _) = res?;
+            t
+        } else {
+            let prompt_file = write_prompt_file(&prompt)?;
+            let args: Vec<String> = agent.plan_args.clone();
+            let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                let pid = child.0.id();
+                *cancel.pid.lock().unwrap() = Some(pid);
+                let app3 = app.clone();
+                let store3 = store.clone();
+                let tid3 = task.id.clone();
+                let rid3 = run_id.to_string();
+                let budget = StepBudget::new(0);
+                read_stream(&mut child, &cancel, &budget, &[], move |desc| {
+                    emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                })
+            });
+            let _ = fs::remove_file(&prompt_file);
+            let (t, _) = res?;
+            t
+        };
+
+        let reply = text.trim().to_string();
+        if reply.is_empty() {
+            return Err("el agente no respondió".into());
+        }
+        run.summary = Some(format!("respondió ({} caracteres)", reply.len()));
+
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.chat_messages.push(crate::model::ChatMessage {
+            role: "agent".into(),
+            text: reply,
+            created_at: now_ms(),
+        });
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
+        let _ = app.emit("chat-reply", json!({"taskId": task.id, "runId": run_id}));
         Ok(())
     })();
 

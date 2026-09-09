@@ -129,6 +129,7 @@ fn new_task(store: &Store, title: &str, intent: &str) -> Result<Task, String> {
         plan_artifacts: Vec::new(),
         pending_docs: Vec::new(),
         tickets: Vec::new(),
+        chat_messages: Vec::new(),
         review_comments: Vec::new(),
     };
     store.save_task(&task)?;
