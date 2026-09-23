@@ -17,11 +17,14 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn new_id(prefix: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{}_{}", prefix, n)
+    let r = RandomState::new().build_hasher().finish();
+    format!("{}_{}_{:x}", prefix, n, r)
 }
 
 #[derive(Clone)]
@@ -125,7 +128,7 @@ impl Store {
     // ---------- tasks ----------
 
     pub fn list_tasks(&self) -> Result<Vec<Task>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         let mut stmt = conn
             .prepare("SELECT data FROM tasks ORDER BY updated_at DESC")
             .map_err(sql_err)?;
@@ -145,7 +148,7 @@ impl Store {
 
     pub fn save_task(&self, task: &Task) -> Result<(), String> {
         let data = serde_json::to_string(task).map_err(|e| e.to_string())?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         conn.execute(
             "INSERT INTO tasks (id, title, status, created_at, updated_at, data)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -167,7 +170,7 @@ impl Store {
     }
 
     pub fn load_task(&self, id: &str) -> Result<Task, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         conn.query_row("SELECT data FROM tasks WHERE id = ?1", [id], |row| {
             row.get::<_, String>(0)
         })
@@ -176,7 +179,7 @@ impl Store {
     }
 
     pub fn delete_task(&self, id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         conn.execute("DELETE FROM runs WHERE task_id = ?1", [id])
             .map_err(sql_err)?;
         conn.execute("DELETE FROM tasks WHERE id = ?1", [id])
@@ -191,7 +194,7 @@ impl Store {
         let mut clean = run.clone();
         clean.events = Vec::new();
         let data = serde_json::to_string(&clean).map_err(|e| e.to_string())?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         conn.execute(
             "INSERT INTO runs (id, task_id, agent, mode, status, started_at, finished_at, data)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -215,7 +218,7 @@ impl Store {
     }
 
     pub fn load_run(&self, task_id: &str, run_id: &str) -> Result<Run, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         let data: String = conn
             .query_row(
                 "SELECT data FROM runs WHERE task_id = ?1 AND id = ?2",
@@ -229,7 +232,7 @@ impl Store {
     }
 
     pub fn list_runs(&self, task_id: &str) -> Result<Vec<Run>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         let mut stmt = conn
             .prepare("SELECT id, data FROM runs WHERE task_id = ?1 ORDER BY started_at DESC")
             .map_err(sql_err)?;
@@ -251,7 +254,7 @@ impl Store {
 
     pub fn append_event(&self, task_id: &str, run_id: &str, ev: &RunEvent) -> Result<(), String> {
         let data = serde_json::to_string(ev).map_err(|e| e.to_string())?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         conn.execute(
             "INSERT INTO events (task_id, run_id, ts, kind, data) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
@@ -269,46 +272,56 @@ impl Store {
     /// Marca los runs "running" como failed (la app se cerró con runs activos)
     /// y devuelve las tasks afectadas al estado ready.
     pub fn fail_stale_running_runs(&self) -> Result<Vec<String>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut task_ids: Vec<String> = Vec::new();
-        {
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT task_id FROM runs WHERE status = 'running'")
-                .map_err(sql_err)?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(sql_err)?;
-            for row in rows {
-                task_ids.push(row.map_err(sql_err)?);
-            }
-        }
-        for tid in &task_ids {
-            let mut stmt = conn
-                .prepare("SELECT data FROM runs WHERE task_id = ?1 AND status = 'running'")
-                .map_err(sql_err)?;
-            let rows = stmt
-                .query_map([tid], |row| row.get::<_, String>(0))
-                .map_err(sql_err)?;
-            for row in rows {
-                let data: String = row.map_err(sql_err)?;
-                if let Ok(mut run) = serde_json::from_str::<Run>(&data) {
-                    run.status = "failed".into();
-                    run.finished_at = Some(now_ms());
-                    run.summary = Some("interrumpido: la app se cerró mientras corría".into());
-                    if let Ok(data) = serde_json::to_string(&run) {
-                        let _ = conn.execute(
-                            "UPDATE runs SET status='failed', finished_at=?2, data=?3 WHERE id=?1",
-                            rusqlite::params![run.id, run.finished_at.map(|f| f as i64), data],
-                        );
-                    }
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
+        // Transacción: evita que otro hilo modifique estos runs entre lectura y escritura
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_err)?;
+        let result = (|| -> Result<Vec<String>, String> {
+            let mut task_ids: Vec<String> = Vec::new();
+            {
+                let mut stmt = conn
+                    .prepare("SELECT DISTINCT task_id FROM runs WHERE status = 'running'")
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(sql_err)?;
+                for row in rows {
+                    task_ids.push(row.map_err(sql_err)?);
                 }
             }
-            let _ = conn.execute(
-                "UPDATE tasks SET status='ready', data=json_set(data, '$.status', 'ready'), updated_at=?2 WHERE id=?1 AND status='in_dev'",
-                rusqlite::params![tid, now_ms() as i64],
-            );
+            for tid in &task_ids {
+                let mut stmt = conn
+                    .prepare("SELECT data FROM runs WHERE task_id = ?1 AND status = 'running'")
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([tid], |row| row.get::<_, String>(0))
+                    .map_err(sql_err)?;
+                for row in rows {
+                    let data: String = row.map_err(sql_err)?;
+                    if let Ok(mut run) = serde_json::from_str::<Run>(&data) {
+                        run.status = "failed".into();
+                        run.finished_at = Some(now_ms());
+                        run.summary = Some("interrumpido: la app se cerró mientras corría".into());
+                        if let Ok(data) = serde_json::to_string(&run) {
+                            let _ = conn.execute(
+                                "UPDATE runs SET status='failed', finished_at=?2, data=?3 WHERE id=?1",
+                                rusqlite::params![run.id, run.finished_at.map(|f| f as i64), data],
+                            );
+                        }
+                    }
+                }
+                let _ = conn.execute(
+                    "UPDATE tasks SET status='ready', data=json_set(data, '$.status', 'ready'), updated_at=?2 WHERE id=?1 AND status='in_dev'",
+                    rusqlite::params![tid, now_ms() as i64],
+                );
+            }
+            Ok(task_ids)
+        })();
+        // Commit o rollback según resultado
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT").map_err(sql_err)?,
+            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
         }
-        Ok(task_ids)
+        result
     }
 
     // ---------- json helpers / migración ----------
@@ -337,7 +350,7 @@ impl Store {
         if imported.exists() {
             return; // migración ya hecha antes
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("nerve: store mutex poisoned");
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => return,

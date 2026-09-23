@@ -45,6 +45,14 @@ interface PendingDoc {
 interface ChatMessage {
   role: string; // user | agent
   text: string;
+  fromAgent?: string; // agente que respondió (A2A)
+  createdAt: number;
+}
+
+interface AgentMessage {
+  kind: string; // query | reply
+  fromAgent: string;
+  text: string;
   createdAt: number;
 }
 
@@ -61,6 +69,7 @@ interface Task {
   pendingDocs?: PendingDoc[];
   tickets: Ticket[];
   chatMessages?: ChatMessage[];
+  agentMessages?: AgentMessage[];
   reviewComments?: ReviewComment[];
 }
 
@@ -257,6 +266,7 @@ function runKindLabel(mode: string, techMode: boolean) {
   if (mode === "doc") return "documento (solo lee)";
   if (mode === "ask") return "preguntas (solo lee)";
   if (mode === "chat") return "conversación (solo lee)";
+  if (mode === "a2a") return "consulta al equipo (solo lee)";
   if (mode === "workspace") return "directo en tu proyecto";
   return "en copia aislada";
 }
@@ -1576,7 +1586,7 @@ function TaskView(props: {
   const runPlan = async () => {
     try {
       await invoke("start_plan_run", { taskId: task.id, agentId: props.selectedAgent, mode: "workspace", resumeSession: wantResume, skillId: selectedSkill });
-      props.refreshRuns();
+      await props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
     }
@@ -1585,7 +1595,7 @@ function TaskView(props: {
   const runExec = async () => {
     try {
       await invoke("start_exec_run", { taskId: task.id, agentId: props.selectedAgent, mode: props.runMode, resumeSession: wantResume, yolo });
-      props.refreshRuns();
+      await props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
     }
@@ -1633,7 +1643,7 @@ function TaskView(props: {
     if (!lastExecDone) return;
     try {
       await invoke("start_verify_run", { taskId: task.id, runId: lastExecDone.id, agentId: props.selectedAgent });
-      props.refreshRuns();
+      await props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
     }
@@ -1643,7 +1653,7 @@ function TaskView(props: {
     if (!lastExecDone) return;
     try {
       await invoke("fix_comments", { taskId: task.id, mode: props.runMode, agentId: props.selectedAgent, targetRunId: lastExecDone.id });
-      props.refreshRuns();
+      await props.refreshRuns();
     } catch (e) {
       props.setError(String(e));
     }
@@ -2053,6 +2063,22 @@ function ChatPanel(props: {
     }
   };
 
+  // A2A: consulta a los agentes pares del agente seleccionado (solo lectura)
+  const askTeam = async () => {
+    const m = draft.trim();
+    if (!m || sending || props.busy) return;
+    setSending(true);
+    setDraft("");
+    try {
+      await invoke("send_a2a", { taskId: props.task.id, agentId: props.selectedAgent, question: m });
+      await props.refreshRuns();
+    } catch (e) {
+      props.setError(String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
   const clear = () => {
     invoke<Task>("clear_chat", { taskId: props.task.id })
       .then((t) => props.updateCurrent(t))
@@ -2106,6 +2132,9 @@ function ChatPanel(props: {
     el: (
       <div className={`chat-msg ${m.role}`}>
         <div className="chat-bubble">
+          {m.role === "agent" && m.fromAgent && (
+            <div className="chat-agent-name">{agentLabel(m.fromAgent)}</div>
+          )}
           <div className="chat-text">{m.text}</div>
           <div className="chat-time">{fmtTime(m.createdAt)}</div>
         </div>
@@ -2247,6 +2276,14 @@ function ChatPanel(props: {
             title={props.busy ? "Espera a que termine la ejecución en curso" : ""}
           >
             Enviar
+          </button>
+          <button
+            className="ghost"
+            onClick={askTeam}
+            disabled={!draft.trim() || sending || props.busy}
+            title="Consulta a los demás agentes del workspace y agrega su criterio al chat"
+          >
+            🤝 A2A
           </button>
         </div>
       </div>
@@ -2390,7 +2427,7 @@ function RunsPanel(props: {
                   onClick={async (e) => {
                     e.stopPropagation();
                     await invoke("cancel_run", { runId: r.id });
-                    props.refreshRuns();
+                    await props.refreshRuns();
                   }}
                 >
                   Detener

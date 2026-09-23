@@ -152,6 +152,7 @@ pub fn run_exec(
     model: &str,
     prompt: &str,
     cwd: &Path,
+    allowlist: &[String],
     mut on_event: impl FnMut(String) -> Result<(), String>,
 ) -> Result<(String, bool), String> {
     if model.trim().is_empty() {
@@ -198,7 +199,7 @@ pub fn run_exec(
         for call in &calls {
             let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
             let raw = call.pointer("/function/arguments").cloned().unwrap_or(json!({}));
-            let out = dispatch_exec_tool(cwd, name, &raw);
+            let out = dispatch_exec_tool(cwd, name, &raw, allowlist);
             on_event(format!("{}({}) → {}", name, brief_args(&raw), out.chars().take(120).collect::<String>()))?;
             let tcid = call.get("id").and_then(Value::as_str).unwrap_or("");
             messages.push(json!({"role":"tool","tool_call_id": tcid, "content": out}));
@@ -273,7 +274,7 @@ fn dispatch_read_tool(cwd: &Path, name: &str, args: &Value) -> String {
     }
 }
 
-fn dispatch_exec_tool(cwd: &Path, name: &str, args: &Value) -> String {
+fn dispatch_exec_tool(cwd: &Path, name: &str, args: &Value, allowlist: &[String]) -> String {
     match name {
         "write_file" | "edit_file" | "delete_file" | "run_command" => {
             match check_path(cwd, args.get("path").and_then(Value::as_str).unwrap_or("")) {
@@ -284,7 +285,7 @@ fn dispatch_exec_tool(cwd: &Path, name: &str, args: &Value) -> String {
                 "write_file" => tool_write_file(cwd, args),
                 "edit_file" => tool_edit_file(cwd, args),
                 "delete_file" => tool_delete_file(cwd, args),
-                "run_command" => tool_run_command(cwd, args),
+                "run_command" => tool_run_command(cwd, args, allowlist),
                 _ => unreachable!(),
             }
         }
@@ -444,24 +445,21 @@ fn tool_delete_file(cwd: &Path, args: &Value) -> String {
 }
 
 #[cfg(windows)]
-fn run_command_raw(cwd: &Path, command: &str) -> std::process::Output {
+fn run_command_raw(cwd: &Path, command: &str) -> Result<std::process::Output, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // Se ejecuta vía .bat temporal: preserva las comillas internas del comando
-    // (cmd /s /c rompe el quoting de args con comillas dobles).
     let bat = std::env::temp_dir().join(format!(
         "nerve-cmd-{}-{}.bat",
         now_ms(),
         std::process::id()
     ));
     if fs::write(&bat, format!("@echo off\r\n{}\r\n", command)).is_err() {
-        // fallback: ejecución directa
         return std::process::Command::new("cmd")
             .args(["/d", "/s", "/c", command])
             .current_dir(cwd)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .expect("run_command: no se pudo lanzar el proceso");
+            .map_err(|e| format!("no se pudo lanzar el comando: {}", e));
     }
     let out = std::process::Command::new("cmd")
         .arg("/d")
@@ -470,33 +468,40 @@ fn run_command_raw(cwd: &Path, command: &str) -> std::process::Output {
         .current_dir(cwd)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .expect("run_command: no se pudo lanzar el proceso");
+        .map_err(|e| format!("no se pudo lanzar el comando: {}", e))?;
     let _ = fs::remove_file(&bat);
-    out
+    Ok(out)
 }
 
 #[cfg(not(windows))]
-fn run_command_raw(cwd: &Path, command: &str) -> std::process::Output {
+fn run_command_raw(cwd: &Path, command: &str) -> Result<std::process::Output, String> {
     std::process::Command::new("sh")
         .args(["-c", command])
         .current_dir(cwd)
         .output()
-        .expect("run_command: no se pudo lanzar el proceso")
+        .map_err(|e| format!("no se pudo lanzar el comando: {}", e))
 }
 
-fn tool_run_command(cwd: &Path, args: &Value) -> String {
+fn tool_run_command(cwd: &Path, args: &Value, allowlist: &[String]) -> String {
     let command = args.get("command").and_then(Value::as_str).unwrap_or("");
     if command.trim().is_empty() {
         return "ERROR: comando vacío".into();
     }
-    let out = run_command_raw(cwd, command);
-    let code = out.status.code().unwrap_or(-1);
-    format!(
-        "exit={} \n{}{}",
-        code,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
+    if !crate::runner::command_allowed(command, allowlist) {
+        return "ERROR: comando bloqueado — no está en la allowlist del workspace".into();
+    }
+    match run_command_raw(cwd, command) {
+        Ok(out) => {
+            let code = out.status.code().unwrap_or(-1);
+            format!(
+                "exit={} \n{}{}",
+                code,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        }
+        Err(e) => format!("ERROR: {}", e),
+    }
 }
 
 // mantener `Write` en uso (write! sobre archivos temporales futuros)

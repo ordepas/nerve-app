@@ -48,7 +48,7 @@ pub fn register_run(registry: &RunRegistry, run_id: &str) -> CancelState {
 }
 
 pub fn unregister_run(registry: &RunRegistry, run_id: &str) {
-    registry.lock().unwrap().remove(run_id);
+    registry.lock().expect("nerve: mutex poisoned").remove(run_id);
 }
 
 pub fn plan_prompt(intent: &str) -> String {
@@ -147,6 +147,16 @@ pub fn ask_prompt(kind: &str, task: &Task, context: &str) -> String {
 
 /// Extrae el bloque JSON de preguntas (fenced o línea con "questions").
 pub fn extract_questions_block(text: &str) -> Option<Value> {
+    extract_fenced_json(text, "\"questions\"")
+}
+
+/// Extrae el bloque JSON de respuesta A2A (fenced o línea con "reply").
+pub fn extract_a2a_block(text: &str) -> Option<Value> {
+    extract_fenced_json(text, "\"reply\"")
+}
+
+/// Extrae un bloque JSON (fenced ```json o línea suelta) que contiene `field`.
+pub fn extract_fenced_json(text: &str, field: &str) -> Option<Value> {
     let candidate = if let Some(start) = text.find("```json") {
         let rest = &text[start + 7..];
         let end = rest.find("```").unwrap_or(rest.len());
@@ -156,7 +166,7 @@ pub fn extract_questions_block(text: &str) -> Option<Value> {
             .rev()
             .find(|l| {
                 let s = l.trim_start();
-                s.starts_with('{') && s.contains("\"questions\"")
+                s.starts_with('{') && s.contains(field)
             })
             .map(|l| l.trim().to_string())?
     };
@@ -259,7 +269,7 @@ pub fn run_doc(
             args.push(last_msg.to_string_lossy().to_string());
             let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 read_stream_codex(&mut child, &cancel, &last_msg)
             });
             let _ = fs::remove_file(&prompt_file);
@@ -271,7 +281,7 @@ pub fn run_doc(
             let args: Vec<String> = agent.plan_args.clone();
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 let app3 = app.clone();
                 let store3 = store.clone();
                 let tid3 = task.id.clone();
@@ -413,7 +423,7 @@ pub fn run_questions(
             args.push(last_msg.to_string_lossy().to_string());
             let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 read_stream_codex(&mut child, &cancel, &last_msg)
             });
             let _ = fs::remove_file(&prompt_file);
@@ -425,7 +435,7 @@ pub fn run_questions(
             let args: Vec<String> = agent.plan_args.clone();
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 let app3 = app.clone();
                 let store3 = store.clone();
                 let tid3 = task.id.clone();
@@ -560,7 +570,7 @@ pub fn run_chat(
             args.push(last_msg.to_string_lossy().to_string());
             let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 read_stream_codex(&mut child, &cancel, &last_msg)
             });
             let _ = fs::remove_file(&prompt_file);
@@ -572,7 +582,7 @@ pub fn run_chat(
             let args: Vec<String> = agent.plan_args.clone();
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 let app3 = app.clone();
                 let store3 = store.clone();
                 let tid3 = task.id.clone();
@@ -597,11 +607,338 @@ pub fn run_chat(
         fresh.chat_messages.push(crate::model::ChatMessage {
             role: "agent".into(),
             text: reply,
+            from_agent: agent.id.clone(),
             created_at: now_ms(),
         });
         fresh.updated_at = now_ms();
         store.save_task(&fresh)?;
         let _ = app.emit("task-updated", &fresh);
+        let _ = app.emit("chat-reply", json!({"taskId": task.id, "runId": run_id}));
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        finish(&app, store, registry, &mut run, Some(e));
+    } else {
+        finish(&app, store, registry, &mut run, None);
+    }
+    let _ = cancel;
+    run
+}
+
+// ---------- A2A: consulta inter-agente (estilo inter-agent messages) ----------
+
+/// Prompt A2A: los pares responden primero (con la conversación previa como
+/// contexto compartido) y el consultado agrega el criterio final.
+pub fn a2a_prompt(task: &Task, peers: &str, history: &str, question: &str) -> String {
+    let hist = if history.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nMensajes inter-agente previos en esta task (respeta el hilo):\n{history}"
+        )
+    };
+    format!(
+        "Eres un asistente especializado de Nerve. Otro asistente del equipo pidió tu opinión para esta tarea; los asistentes pares ya dejaron la suya. Lee tu proyecto si ayuda (solo lectura; no modifiques nada) y agrega tu criterio técnico, aportando algo distinto o más concreto que lo anterior.{hist}\n\nIntención: {intent}\nTítulo: {title}\n\nConsulta de {peers}:\n{question}\n\nTu respuesta final debe terminar EXACTAMENTE con este bloque JSON en una línea:\n```json\n{{\"reply\":\"tu aporte final al equipo (2-6 frases)\"}}\n```",
+        intent = task.intent,
+        title = task.title,
+        peers = peers,
+        question = question,
+        hist = hist,
+    )
+}
+
+/// Run A2A (modo "a2a"): consulta a los agentes pares del elegido (solo
+/// lectura). La consulta y cada aporte quedan en task.agent_messages y la
+/// respuesta agregada aparece en el chat con el nombre del agente consultado.
+#[allow(clippy::too_many_arguments)]
+pub fn run_a2a(
+    app: AppHandle,
+    store: &Store,
+    registry: &RunRegistry,
+    run_id: &str,
+    task: &Task,
+    agent: &AgentDef,
+    ws: &Path,
+    question: &str,
+    peers: &[AgentDef],
+) -> Run {
+    let cancel = register_run(registry, run_id);
+    let mut run = Run {
+        id: run_id.to_string(),
+        task_id: task.id.clone(),
+        agent: agent.id.clone(),
+        mode: "a2a".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    };
+    let _ = store.save_run(&run);
+
+    let result: Result<(), String> = (|| {
+        emit(&app, store, &task.id, run_id, "info", Some("Consultando al equipo de asistentes (A2A)…".into()), None);
+        // 1) la consulta queda registrada con el agente que consulta
+        let mut fresh = store.load_task(&task.id)?;
+        fresh.agent_messages.push(crate::model::AgentMessage {
+            kind: "query".into(),
+            from_agent: agent.id.clone(),
+            text: question.to_string(),
+            created_at: now_ms(),
+        });
+        fresh.updated_at = now_ms();
+        store.save_task(&fresh)?;
+        let _ = app.emit("task-updated", &fresh);
+
+        // 2) respuestas de los pares (el consultado agrega al final); con
+        // mock, el consultado responde directo (contrato idéntico)
+        let mock = agent.kind == "mock";
+        if mock {
+            let reply = mock_agent::a2a_output(question);
+            let mut fresh = store.load_task(&task.id)?;
+            fresh.agent_messages.push(crate::model::AgentMessage {
+                kind: "reply".into(),
+                from_agent: agent.id.clone(),
+                text: reply.clone(),
+                created_at: now_ms(),
+            });
+            fresh.chat_messages.push(crate::model::ChatMessage {
+                role: "agent".into(),
+                text: format!("🤝 A2A — respuesta del equipo a tu consulta:\n{}", reply),
+                from_agent: agent.id.clone(),
+                created_at: now_ms(),
+            });
+            fresh.updated_at = now_ms();
+            store.save_task(&fresh)?;
+            let _ = app.emit("task-updated", &fresh);
+        } else {
+            let history = fresh
+                .agent_messages
+                .iter()
+                .map(|m| {
+                    format!(
+                        "- {} ({}): {}",
+                        if m.kind == "query" { "consulta" } else { "respuesta" },
+                        m.created_at,
+                        m.text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for peer in peers {
+                if cancel.cancelled() {
+                    return Err("__cancelled__".into());
+                }
+                emit(
+                    &app,
+                    store,
+                    &task.id,
+                    run_id,
+                    "info",
+                    Some(format!("→ pregunta a {}", peer.label)),
+                    None,
+                );
+                let text: String = if peer.kind == "mock" {
+                    mock_agent::a2a_output(question)
+                } else if peer.kind == "ollama" {
+                    let cfg = store.load_workspace()?;
+                    let prompt = a2a_prompt(task, &agent.label, &history, question);
+                    let (t, _) =
+                        ollama::run_read_prompt(&cfg.ollama_url, &cfg.ollama_model, &prompt, ws, |line| {
+                            if cancel.cancelled() {
+                                return Err("__cancelled__".into());
+                            }
+                            emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                            Ok(())
+                        })?;
+                    t
+                } else {
+                    let prompt = a2a_prompt(task, &agent.label, &history, &question.to_string());
+                    let prompt_file = write_prompt_file(&prompt)?;
+                    let res = if peer.kind == "codex" {
+                        let last_msg =
+                            std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+                        let mut args: Vec<String> = peer.plan_args.clone();
+                        args.push("--output-last-message".into());
+                        args.push(last_msg.to_string_lossy().to_string());
+                        let r = spawn_agent_codex(&peer.bin, &args, ws, Some(&prompt_file))
+                            .and_then(|mut child| {
+                                let pid = child.0.id();
+                                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
+                                read_stream_codex(&mut child, &cancel, &last_msg)
+                            });
+                        let _ = fs::remove_file(&last_msg);
+                        r
+                    } else {
+                        let args: Vec<String> = peer.plan_args.clone();
+                        spawn_agent(&peer.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                            let pid = child.0.id();
+                            *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
+                            let app3 = app.clone();
+                            let store3 = store.clone();
+                            let tid3 = task.id.clone();
+                            let rid3 = run_id.to_string();
+                            let budget = StepBudget::new(0);
+                            read_stream(&mut child, &cancel, &budget, &[], move |desc| {
+                                emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                            })
+                        })
+                    };
+                    let _ = fs::remove_file(&prompt_file);
+                    let (t, _) = res?;
+                    t
+                };
+                let peer_text = text;
+                let v = extract_a2a_block(&peer_text)
+                    .ok_or_else(|| format!("{} no devolvió el bloque JSON de respuesta A2A", peer.id))?;
+                let reply = v
+                    .get("reply")
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .ok_or("el bloque JSON no tiene \"reply\"")?;
+                let mut fresh = store.load_task(&task.id)?;
+                fresh.agent_messages.push(crate::model::AgentMessage {
+                    kind: "reply".into(),
+                    from_agent: peer.id.clone(),
+                    text: reply,
+                    created_at: now_ms(),
+                });
+                fresh.updated_at = now_ms();
+                store.save_task(&fresh)?;
+                let _ = app.emit("task-updated", &fresh);
+                emit(
+                    &app,
+                    store,
+                    &task.id,
+                    run_id,
+                    "info",
+                    Some(format!("✓ {} respondió", peer.label)),
+                    None,
+                );
+            }
+
+            // 3) el consultado agrega el criterio final (respuesta del chat)
+            if cancel.cancelled() {
+                return Err("__cancelled__".into());
+            }
+            let fresh = store.load_task(&task.id)?;
+            let history = fresh
+                .agent_messages
+                .iter()
+                .map(|m| {
+                    format!(
+                        "- {} ({}): {}",
+                        if m.kind == "query" { "consulta" } else { "respuesta" },
+                        m.created_at,
+                        m.text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let prompt = a2a_prompt(task, &agent.label, &history, question);
+            emit(
+                &app,
+                store,
+                &task.id,
+                run_id,
+                "info",
+                Some(format!("→ {} agrega el criterio final", agent.label)),
+                None,
+            );
+            let text: String = if agent.kind == "ollama" {
+                let cfg = store.load_workspace()?;
+                let (t, _) =
+                    ollama::run_read_prompt(&cfg.ollama_url, &cfg.ollama_model, &prompt, ws, |line| {
+                        if cancel.cancelled() {
+                            return Err("__cancelled__".into());
+                        }
+                        emit(&app, store, &task.id, run_id, "chunk", Some(line.clone()), None);
+                        Ok(())
+                    })?;
+                t
+            } else if agent.kind == "codex" {
+                let prompt_file = write_prompt_file(&prompt)?;
+                let last_msg = std::env::temp_dir().join(format!("nerve-codex-last-{}.txt", run_id));
+                let mut args: Vec<String> = agent.plan_args.clone();
+                args.push("--output-last-message".into());
+                args.push(last_msg.to_string_lossy().to_string());
+                let r = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(
+                    |mut child| {
+                        let pid = child.0.id();
+                        *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
+                        read_stream_codex(&mut child, &cancel, &last_msg)
+                    },
+                );
+                let _ = fs::remove_file(&prompt_file);
+                let _ = fs::remove_file(&last_msg);
+                let (t, _) = r?;
+                t
+            } else {
+                let prompt_file = write_prompt_file(&prompt)?;
+                let args: Vec<String> = agent.plan_args.clone();
+                let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
+                    let pid = child.0.id();
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
+                    let app3 = app.clone();
+                    let store3 = store.clone();
+                    let tid3 = task.id.clone();
+                    let rid3 = run_id.to_string();
+                    let budget = StepBudget::new(0);
+                    read_stream(&mut child, &cancel, &budget, &[], move |desc| {
+                        emit(&app3, &store3, &tid3, &rid3, "stream", Some(desc), None);
+                    })
+                });
+                let _ = fs::remove_file(&prompt_file);
+                let (t, _) = res?;
+                t
+            };
+            let v = extract_a2a_block(&text)
+                .ok_or("el agente no devolvió el bloque JSON de respuesta A2A")?;
+            let reply = v
+                .get("reply")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or("el bloque JSON no tiene \"reply\"")?;
+
+            // la respuesta agregada queda registrada y visible en el chat
+            let mut fresh = store.load_task(&task.id)?;
+            fresh.agent_messages.push(crate::model::AgentMessage {
+                kind: "reply".into(),
+                from_agent: agent.id.clone(),
+                text: reply.clone(),
+                created_at: now_ms(),
+            });
+            fresh.chat_messages.push(crate::model::ChatMessage {
+                role: "agent".into(),
+                text: format!("🤝 A2A — respuesta del equipo a tu consulta:\n{}", reply),
+                from_agent: agent.id.clone(),
+                created_at: now_ms(),
+            });
+            fresh.updated_at = now_ms();
+            store.save_task(&fresh)?;
+            let _ = app.emit("task-updated", &fresh);
+        }
+        run.summary = Some(format!(
+            "A2A: {} aporte(s) del equipo registrado(s)",
+            store.load_task(&task.id)?.agent_messages.len()
+        ));
+        emit(
+            &app,
+            store,
+            &task.id,
+            run_id,
+            "a2a",
+            Some("Respuesta del equipo registrada en el chat".into()),
+            None,
+        );
         let _ = app.emit("chat-reply", json!({"taskId": task.id, "runId": run_id}));
         Ok(())
     })();
@@ -913,7 +1250,7 @@ impl StepBudget {
         if self.max == 0 {
             return Ok(());
         }
-        let mut c = self.count.lock().unwrap();
+        let mut c = self.count.lock().expect("nerve: mutex poisoned");
         *c += 1;
         if *c > self.max {
             self.exceeded.store(true, Ordering::Relaxed);
@@ -925,7 +1262,7 @@ impl StepBudget {
         Ok(())
     }
     pub fn used(&self) -> u64 {
-        *self.count.lock().unwrap()
+        *self.count.lock().expect("nerve: mutex poisoned")
     }
     pub fn exceeded(&self) -> bool {
         self.exceeded.load(Ordering::Relaxed)
@@ -1290,7 +1627,7 @@ pub fn run_plan(
             args.push(last_msg.to_string_lossy().to_string());
             let res = spawn_agent_codex(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 read_stream_codex(&mut child, &cancel, &last_msg)
             });
             let _ = fs::remove_file(&prompt_file);
@@ -1310,7 +1647,7 @@ pub fn run_plan(
             }
             let res = spawn_agent(&agent.bin, &args, ws, Some(&prompt_file)).and_then(|mut child| {
                 let pid = child.0.id();
-                *cancel.pid.lock().unwrap() = Some(pid);
+                *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                 let app3 = app.clone();
                 let store3 = store.clone();
                 let tid3 = task.id.clone();
@@ -1480,7 +1817,7 @@ pub fn run_exec(
                     t.acceptance.clone(),
                     t.verify_command.clone(),
                 )]);
-                let (text, complete) = ollama::run_exec(&cfg.ollama_url, &cfg.ollama_model, &prompt, &cwd, |line| {
+                let (text, complete) = ollama::run_exec(&cfg.ollama_url, &cfg.ollama_model, &prompt, &cwd, &allowlist, |line| {
                     if cancel.cancelled() {
                         return Err("__cancelled__".into());
                     }
@@ -1513,7 +1850,7 @@ pub fn run_exec(
                 args.push(last_msg.to_string_lossy().to_string());
                 let res = spawn_agent_codex(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     read_stream_codex(&mut child, &cancel, &last_msg)
                 });
                 let _ = fs::remove_file(&prompt_file);
@@ -1538,7 +1875,7 @@ pub fn run_exec(
                 }
                 let res = spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     let app3 = app.clone();
                     let store3 = store.clone();
                     let tid3 = task.id.clone();
@@ -1755,7 +2092,7 @@ pub fn verify_run(
                 args.push(last_msg.to_string_lossy().to_string());
                 let r = spawn_agent_codex(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     read_stream_codex(&mut child, &cancel, &last_msg)
                 });
                 let _ = fs::remove_file(&last_msg);
@@ -1764,7 +2101,7 @@ pub fn verify_run(
                 let mut args: Vec<String> = agent.plan_args.clone();
                 spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     let app3 = app.clone();
                     let store3 = store.clone();
                     let tid3 = task.id.clone();
@@ -1934,7 +2271,7 @@ pub fn run_fix_run(
             mock_agent::exec_apply(&dir, "corrección de comentarios de verificación")?
         } else if agent.kind == "ollama" {
             let cfg = store.load_workspace()?;
-            let (text, _complete) = ollama::run_exec(&cfg.ollama_url, &cfg.ollama_model, &prompt, &cwd, |line| {
+            let (text, _complete) = ollama::run_exec(&cfg.ollama_url, &cfg.ollama_model, &prompt, &cwd, &cfg.command_allowlist, |line| {
                 if cancel.cancelled() {
                     return Err("__cancelled__".into());
                 }
@@ -1951,7 +2288,7 @@ pub fn run_fix_run(
                 args.push(last_msg.to_string_lossy().to_string());
                 let r = spawn_agent_codex(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     read_stream_codex(&mut child, &cancel, &last_msg)
                 });
                 let _ = fs::remove_file(&last_msg);
@@ -1960,7 +2297,7 @@ pub fn run_fix_run(
                 let mut args: Vec<String> = agent.exec_args.clone();
                 spawn_agent(&agent.bin, &args, &cwd, Some(&prompt_file)).and_then(|mut child| {
                     let pid = child.0.id();
-                    *cancel.pid.lock().unwrap() = Some(pid);
+                    *cancel.pid.lock().expect("nerve: mutex poisoned") = Some(pid);
                     let app3 = app.clone();
                     let store3 = store.clone();
                     let tid3 = task.id.clone();
@@ -2039,4 +2376,57 @@ pub fn run_fix_run(
     }
     let _ = cancel;
     run
+}
+
+#[cfg(test)]
+mod a2a_tests {
+    use super::*;
+
+    /// El contrato A2A: el bloque ```json con "reply" se parsea desde el texto
+    /// del agente (fenced) y desde una línea JSON suelta.
+    #[test]
+    fn extract_a2a_from_fenced_and_plain() {
+        let fenced = "Prefacio del agente.\n\n```json\n{\"reply\":\"criterio del equipo\"}\n```";
+        let v = extract_a2a_block(fenced).expect("fenced no parseado");
+        assert_eq!(v.get("reply").and_then(Value::as_str), Some("criterio del equipo"));
+
+        let plain = "texto previo\n{\"reply\":\"respuesta en línea\"}";
+        let v2 = extract_a2a_block(plain).expect("plain no parseado");
+        assert_eq!(v2.get("reply").and_then(Value::as_str), Some("respuesta en línea"));
+    }
+
+    /// La salida del mock termina con el bloque JSON parseable (contrato
+    /// compartido con los adaptadores reales).
+    #[test]
+    fn mock_a2a_output_ends_with_parseable_reply() {
+        let out = crate::mock_agent::a2a_output("¿usa grid o flex el hero?");
+        let v = extract_a2a_block(&out).expect("mock sin bloque reply");
+        assert!(v.get("reply").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false));
+    }
+
+    /// El prompt A2A incluye la consulta, el equipo y el historial previo.
+    #[test]
+    fn a2a_prompt_contains_question_and_history() {
+        let task = crate::model::Task {
+            intent: "landing para celulares".into(),
+            title: "Landing".into(),
+            id: String::new(),
+            status: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            spec_current: None,
+            spec_versions: Vec::new(),
+            plan_artifacts: Vec::new(),
+            pending_docs: Vec::new(),
+            tickets: Vec::new(),
+            chat_messages: Vec::new(),
+            agent_messages: Vec::new(),
+            review_comments: Vec::new(),
+        };
+        let p = a2a_prompt(&task, "Qwen Code", "- respuesta (1): dato previo", "¿grid o flex?");
+        assert!(p.contains("¿grid o flex"));
+        assert!(p.contains("Qwen Code"));
+        assert!(p.contains("dato previo"));
+        assert!(p.contains("\"reply\""));
+    }
 }

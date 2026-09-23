@@ -130,6 +130,7 @@ fn new_task(store: &Store, title: &str, intent: &str) -> Result<Task, String> {
         pending_docs: Vec::new(),
         tickets: Vec::new(),
         chat_messages: Vec::new(),
+        agent_messages: Vec::new(),
         review_comments: Vec::new(),
     };
     store.save_task(&task)?;
@@ -387,10 +388,10 @@ pub fn cancel_epic(
 ) -> Result<EpicDef, String> {
     let mut epic = load_epic(store, epic_id)?;
     if let Some(rid) = epic.current_run.take() {
-        let reg = registry.lock().unwrap();
+        let reg = registry.lock().expect("nerve: mutex poisoned");
         if let Some(cs) = reg.get(&rid) {
             cs.flag.store(true, Ordering::Relaxed);
-            if let Some(pid) = *cs.pid.lock().unwrap() {
+            if let Some(pid) = *cs.pid.lock().expect("nerve: mutex poisoned") {
                 crate::kill_pid(pid);
             }
         }

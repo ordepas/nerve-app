@@ -42,6 +42,31 @@ pub fn kill_pid(pid: u32) {
         .output();
 }
 
+/// ¿Está `bin` disponible como ejecutable en el PATH? (Windows: WHERE)
+pub fn which_exists(bin: &str) -> bool {
+    // Sanitizar: solo permitir caracteres seguros en el nombre del binario
+    if bin.is_empty() || !bin.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("cmd")
+            .args(["/d", "/c", "where", bin])
+            .creation_flags(0x0800_0000)
+            .output();
+        out.map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {}", bin)])
+            .output();
+        out.map(|o| o.status.success()).unwrap_or(false)
+    }
+}
+
 fn ws_path(state: &State<AppState>) -> Result<PathBuf, String> {
     let cfg = state.store.load_workspace()?;
     match cfg.project_path {
@@ -228,6 +253,7 @@ fn create_task(title: String, intent: String, state: State<AppState>) -> Result<
         pending_docs: Vec::new(),
         tickets: Vec::new(),
         chat_messages: Vec::new(),
+        agent_messages: Vec::new(),
         review_comments: Vec::new(),
     };
     state.store.save_task(&task)?;
@@ -476,6 +502,7 @@ fn send_chat(
     t.chat_messages.push(crate::model::ChatMessage {
         role: "user".into(),
         text: msg.clone(),
+        from_agent: String::new(),
         created_at: now_ms(),
     });
     t.updated_at = now_ms();
@@ -500,6 +527,79 @@ fn send_chat(
         task_id,
         agent: agent_label,
         mode: "chat".into(),
+        worktree: None,
+        worktree_path: None,
+        base_sha: None,
+        checkpoint_sha: None,
+        started_at: now_ms(),
+        finished_at: None,
+        status: "running".into(),
+        session_id: None,
+        summary: None,
+        events: Vec::new(),
+    })
+}
+
+/// Consulta A2A: el agente elegido pregunta a los agentes pares habilitados
+/// de otras familias y agrega la respuesta del equipo. Solo lectura.
+#[tauri::command]
+fn send_a2a(
+    app: AppHandle,
+    task_id: String,
+    agent_id: String,
+    question: String,
+    state: State<AppState>,
+) -> Result<Run, String> {
+    let q = question.trim().to_string();
+    if q.is_empty() {
+        return Err("la consulta está vacía".into());
+    }
+    let task = state.store.load_task(&task_id)?;
+    let any_running = state
+        .store
+        .list_runs(&task_id)?
+        .iter()
+        .any(|r| r.status == "running");
+    if any_running {
+        return Err("ya hay una ejecución en curso para esta task".into());
+    }
+    let agents = state.store.load_agents()?;
+    let agent = runner::resolve_agent(&agents.agents, &agent_id)?;
+    // pares: habilitados de otra familia con binario disponible (mock no
+    // necesita binario; para los CLIs, si el bin no está en PATH el run
+    // fallaría al lanzarlo)
+    let peers: Vec<crate::model::AgentDef> = agents
+        .agents
+        .iter()
+        .filter(|a| a.enabled && a.kind != "disabled")
+        .filter(|a| a.id != agent.id && a.kind != agent.kind)
+        .filter(|a| {
+            a.kind == "mock"
+                || a.kind == "ollama"
+                || {
+                    let bin = a.bin.trim();
+                    !bin.is_empty() && which_exists(bin)
+                }
+        })
+        .cloned()
+        .collect();
+    let ws = ws_path(&state)?;
+    let store = state.store.clone();
+    let registry = state.registry.clone();
+    let run_id = new_id("run");
+    let run_id_c = run_id.clone();
+    let q_c = q.clone();
+    let agent_label = agent.id.clone();
+    let peers_c = peers.clone();
+    std::thread::spawn(move || {
+        let run = runner::run_a2a(app.clone(), &store, &registry, &run_id_c, &task, &agent, &ws, &q_c, &peers_c);
+        let _ = app.emit("run-finished", &run);
+    });
+    Ok(Run {
+        id: run_id,
+        task_id,
+        agent: agent_label,
+        mode: "a2a".into(),
         worktree: None,
         worktree_path: None,
         base_sha: None,
@@ -540,10 +640,10 @@ fn get_run(task_id: String, run_id: String, state: State<AppState>) -> Result<Ru
 
 #[tauri::command]
 fn cancel_run(run_id: String, state: State<AppState>) -> Result<bool, String> {
-    let reg = state.registry.lock().unwrap();
+    let reg = state.registry.lock().expect("nerve: mutex poisoned");
     if let Some(cs) = reg.get(&run_id) {
         cs.flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(pid) = *cs.pid.lock().unwrap() {
+        if let Some(pid) = *cs.pid.lock().expect("nerve: mutex poisoned") {
             kill_pid(pid);
         }
         Ok(true)
@@ -977,6 +1077,7 @@ pub fn run() {
             ask_doc,
             answer_doc,
             send_chat,
+            send_a2a,
             clear_chat,
             list_runs,
             get_run,
