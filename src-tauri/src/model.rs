@@ -100,6 +100,22 @@ pub struct AnswerInput {
 pub struct ChatMessage {
     pub role: String, // user | agent
     pub text: String,
+    // agente que respondió (vacío en mensajes previos a A2A)
+    #[serde(default)]
+    pub from_agent: String,
+    pub created_at: u64,
+}
+
+/// Mensaje inter-agente (A2A): la consulta de un agente a sus pares y la
+/// respuesta agregada. Se persiste en la task y alimenta el contexto del chat
+/// y de futuras consultas (estilo "inter-agent messages" de Traycer).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessage {
+    pub kind: String, // query | reply
+    pub from_agent: String,
+    pub text: String,
+    #[serde(default)]
     pub created_at: u64,
 }
 
@@ -127,6 +143,9 @@ pub struct Task {
     // conversación con el agente sobre esta tarea (tab Chat)
     #[serde(default)]
     pub chat_messages: Vec<ChatMessage>,
+    // mensajes inter-agente (A2A): consultas y respuestas entre agentes
+    #[serde(default)]
+    pub agent_messages: Vec<AgentMessage>,
     // comentarios de verificación (diff vs plan), persistidos en la task
     #[serde(default)]
     pub review_comments: Vec<ReviewComment>,

@@ -98,6 +98,15 @@ pub fn chat_output(message: &str) -> String {
     )
 }
 
+/// Consulta inter-agente (A2A) simulada: el mismo contrato que el adaptador
+/// real — el bloque JSON llega al final del texto y Nerve lo parsea igual.
+pub fn a2a_output(question: &str) -> String {
+    format!(
+        "Reviso la consulta del equipo sobre «{}».\n\nEn modo simulado cada asistente aporta su criterio y yo agrego el mío: el flujo SDD de Nerve mantiene aprobación y checkpoints, así que lo razonable es decidir con datos del workspace antes de construir.\n\n```json\n{{\"reply\":\"En modo simulado no uso ningún modelo, pero mi lectura es: concretar el criterio de aceptación de la duda y dejarla registrada en el plan; así cualquier agente que ejecute parte del trabajo la resuelve de la misma forma.\"}}\n```",
+        question
+    )
+}
+
 /// Ejecución simulada: escribe nerve-demo.md en el run dir y devuelve el resumen.
 pub fn exec_apply(run_dir: &Path, ticket_title: &str) -> Result<String, String> {
     let path = run_dir.join("nerve-demo.md");
